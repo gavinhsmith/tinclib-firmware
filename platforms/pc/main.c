@@ -273,6 +273,7 @@ static uint8_t tstate = TINC_TCP_IDLE;
 static struct dns_job *job;
 static uint16_t tport;
 static int connecting, blocked_logged, got_data;
+static unsigned rd_calls, rd_blocked, rd_skipped; /* diagnostics, logged on close */
 
 static void set_nonblocking(sock_t s)
 {
@@ -286,6 +287,9 @@ static void set_nonblocking(sock_t s)
 
 void tinc_plat_tcp_close(void)
 {
+    if (sk != NO_SOCK)
+        say("tcp: close (state %u, recv %u, would-block %u, skipped %u)", tstate, rd_calls, rd_blocked, rd_skipped);
+    rd_calls = rd_blocked = rd_skipped = 0;
     if (job) {
         LOCK();
         if (job->done) {
@@ -418,8 +422,11 @@ uint16_t tinc_plat_tcp_read(uint8_t *p, uint16_t n)
 {
     int r;
 
-    if (tstate != TINC_TCP_OPEN)
+    if (tstate != TINC_TCP_OPEN) {
+        rd_skipped++;
         return 0;
+    }
+    rd_calls++;
     r = (int)recv(sk, (char *)p, n, 0);
     if (r > 0) {
         if (!got_data++)
@@ -428,7 +435,9 @@ uint16_t tinc_plat_tcp_read(uint8_t *p, uint16_t n)
     }
     if (r == 0) {
         tstate = TINC_TCP_CLOSED;
-    } else if (!SOCK_WOULDBLOCK()) {
+    } else if (SOCK_WOULDBLOCK()) {
+        rd_blocked++;
+    } else {
         say("tcp: recv failed (%d)", SOCK_ERRNO());
         tstate = TINC_TCP_ERR_CONNECT;
     }
