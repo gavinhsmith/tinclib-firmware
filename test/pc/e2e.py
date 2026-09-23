@@ -35,8 +35,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def log_message(self, *args):
-        pass
+    def log_message(self, fmt, *args):
+        print("server: " + fmt % args, flush=True)
 
 
 def frame(typ, seq, payload=b""):

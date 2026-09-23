@@ -272,7 +272,7 @@ static sock_t sk = NO_SOCK;
 static uint8_t tstate = TINC_TCP_IDLE;
 static struct dns_job *job;
 static uint16_t tport;
-static int connecting, blocked_logged;
+static int connecting, blocked_logged, got_data;
 
 static void set_nonblocking(sock_t s)
 {
@@ -300,7 +300,7 @@ void tinc_plat_tcp_close(void)
     if (sk != NO_SOCK)
         sock_close(sk);
     sk = NO_SOCK;
-    connecting = blocked_logged = 0;
+    connecting = blocked_logged = got_data = 0;
     tstate = TINC_TCP_IDLE;
 }
 
@@ -400,8 +400,10 @@ uint16_t tinc_plat_tcp_write(const uint8_t *p, uint16_t n)
     if (tstate != TINC_TCP_OPEN)
         return 0;
     w = (int)send(sk, (const char *)p, n, SEND_FLAGS);
-    if (w >= 0)
+    if (w >= 0) {
+        say("tcp: sent %d/%u", w, n);
         return (uint16_t)w;
+    }
     if (!SOCK_WOULDBLOCK()) {
         say("tcp: send failed (%d)", SOCK_ERRNO());
         tstate = TINC_TCP_ERR_CONNECT;
@@ -419,8 +421,11 @@ uint16_t tinc_plat_tcp_read(uint8_t *p, uint16_t n)
     if (tstate != TINC_TCP_OPEN)
         return 0;
     r = (int)recv(sk, (char *)p, n, 0);
-    if (r > 0)
+    if (r > 0) {
+        if (!got_data++)
+            say("tcp: first data (%d bytes)", r);
         return (uint16_t)r;
+    }
     if (r == 0) {
         tstate = TINC_TCP_CLOSED;
     } else if (!SOCK_WOULDBLOCK()) {
