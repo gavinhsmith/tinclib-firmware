@@ -31,6 +31,7 @@ lib/tinc_core/            target-independent core, C99, no Arduino/SDK/OS calls
   link.c                  UART framing, long-poll hold, non-blocking reply drain
   dispatch.c              HELLO gate, SEQ reply cache, message handlers
   req.c                   request state machine + HTTP response parsing
+  describe.c              one-line readable frame descriptions for traces
   transcode.c, wifi_rank.c, proto.c
 platforms/esp8266/        ESP8266 platform layer (Arduino core)
 platforms/pc/             PC platform layer (Win32 / POSIX), env `pc`

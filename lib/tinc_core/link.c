@@ -12,6 +12,7 @@ static uint32_t last_byte_at;
 static uint8_t pending;     /* BODY_READ long-poll in progress */
 static const uint8_t *tx;
 static uint16_t tx_left;
+static tinc_trace_fn trace; /* survives tinc_link_init: set once by the platform */
 
 static void flush(void)
 {
@@ -28,8 +29,15 @@ static void dispatch(void)
 
     pending = n == TINC_PENDING;
     tx_left = pending ? 0 : n;
+    if (tx_left && trace)
+        trace(0, tx, tx_left);
     if (tx_left)
         flush();
+}
+
+void tinc_link_set_trace(tinc_trace_fn fn)
+{
+    trace = fn;
 }
 
 void tinc_link_init(void)
@@ -59,6 +67,8 @@ void tinc_link_step(void)
             tinc_parser_reset(&parser);
         last_byte_at = now;
         if (tinc_parser_feed(&parser, tinc_plat_uart_read()) == TINC_PARSE_FRAME) {
+            if (trace)
+                trace(1, rxbuf, (uint16_t)(TINC_OVERHEAD + parser.len));
             dispatch();
             return; /* the rest wait in the UART buffer */
         }

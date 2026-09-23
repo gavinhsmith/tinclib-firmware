@@ -9,6 +9,11 @@
  * so all three profiles read "Local Network", the profiles are locked
  * (protocol 0.2's Wi-Fi lock: WIFI_SET/WIFI_FORGET get ERR_LOCKED), and
  * every request goes out through the PC's networking stack.
+ *
+ * Every frame is printed to stdout as it passes, one line each:
+ *     12.345  calc > #3 REQ_BEGIN GET http://example.com/ transcode
+ *     12.347  calc < #3 REQ_BEGIN ok
+ * Logs (request states, errors) go to stderr.
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -481,6 +486,21 @@ int tinc_plat_slots_save(const tinc_slots *s)
     return 0;
 }
 
+/* ---- packet trace ----------------------------------------------------- */
+
+static uint32_t started;
+
+static void trace(int from_ce, const uint8_t *frame, uint16_t len)
+{
+    char line[512];
+    uint32_t t = tinc_plat_millis() - started;
+
+    tinc_describe(frame, len, line, sizeof line);
+    printf("%6lu.%03lu  calc %c %s\n", (unsigned long)(t / 1000), (unsigned long)(t % 1000),
+           from_ce ? '>' : '<', line);
+    fflush(stdout);
+}
+
 /* ---- main loop -------------------------------------------------------- */
 
 int main(int argc, char **argv)
@@ -505,6 +525,8 @@ int main(int argc, char **argv)
     setvbuf(stderr, NULL, _IONBF, 0);
     tinc_core_init();
     local_profiles();
+    started = tinc_plat_millis();
+    tinc_link_set_trace(trace);
     say("tinclib-pc: protocol v%d.%d, waiting for %s", TINC_PROTO_MAJOR, TINC_PROTO_MINOR, argv[1]);
 
     for (;;) {

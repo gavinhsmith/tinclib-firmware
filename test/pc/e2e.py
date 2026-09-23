@@ -12,6 +12,7 @@ import select
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tty
@@ -21,13 +22,14 @@ BODY = b"".join(b"line %04d of the test body\n" % i for i in range(200))  # ~5 K
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/data":
+        path = self.path.split("?")[0]
+        if path == "/data":
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(BODY)))
             self.end_headers()
             self.wfile.write(BODY)
-        elif self.path == "/moved":
+        elif path == "/moved":
             self.send_response(302)
             self.send_header("Location", "/data")
             self.send_header("Content-Length", "0")
@@ -103,7 +105,8 @@ def main():
 
     master, slave = pty.openpty()
     tty.setraw(master)
-    proc = subprocess.Popen([app, os.ttyname(slave)])
+    trace = tempfile.TemporaryFile(mode="w+")  # the app's packet trace (stdout)
+    proc = subprocess.Popen([app, os.ttyname(slave)], stdout=trace)
     try:
         link = Link(master)
         time.sleep(0.5)  # app opens the port
@@ -120,6 +123,10 @@ def main():
         err, status, body = get(link, base + "/data")
         assert (err, status, body) == (0, 200, BODY), "err=0x%02X status=%r len=%d" % (err, status, len(body or b""))
         print("ok  GET /data: %d bytes" % len(body))
+
+        err, status, body = get(link, base + "/data?token=s3cret")
+        assert (err, status, body) == (0, 200, BODY), "query: err=0x%02X status=%r" % (err, status)
+        print("ok  GET with a query string")
 
         err, status, body = get(link, base + "/moved")
         assert (err, status, body) == (0, 200, BODY), "redirect: %r" % ((err, status),)
@@ -141,7 +148,7 @@ def main():
         local = b"\x0dLocal Network"
         flags, r = link.call(0x40)
         assert flags == 1 and r == local * 3 + b"\x00\x00\x00", r
-        flags, r = link.call(0x41, b"\x00\x04Home\x08password\x00")
+        flags, r = link.call(0x41, b"\x00\x04Home\x0ehunter22secret\x00")
         assert flags == 5 and r[0] == 0x0A, "WIFI_SET should be ERR_LOCKED: %r %r" % (flags, r)
         flags, r = link.call(0x42, b"\x01")
         assert flags == 5 and r[0] == 0x0A, "WIFI_FORGET should be ERR_LOCKED: %r %r" % (flags, r)
@@ -152,6 +159,18 @@ def main():
         proc.terminate()
         proc.wait(5)
         srv.shutdown()
+
+    trace.seek(0)
+    log = trace.read()
+    print(log[:2000])
+    for want in ("calc > #1 STATUS?", "calc < #1 STATUS -> error NO_HELLO", "HELLO ok v0.2",
+                 "REQ_BEGIN GET http://127.0.0.1:", "/data?...", "REQ_STATUS BODY http=200",
+                 "BODY_READ @0 max=200 wait=50ms", "bytes EOF", "WIFI_SET -> error LOCKED",
+                 'WIFI_LIST 0="Local Network"'):
+        assert want in log, "trace is missing %r" % want
+    for secret in ("s3cret", "hunter22secret"):
+        assert secret not in log, "trace leaked %r" % secret
+    print("ok  packet trace readable, no secrets")
     print("e2e ok")
 
 

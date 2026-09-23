@@ -1001,6 +1001,93 @@ static void test_link_long_poll(void)
     TEST_ASSERT_EQUAL_HEX8(TINC_T_REQ_ABORT, r.type);
 }
 
+/* ---- trace: tinc_describe and the link hook ---- */
+
+static const char *describe(const uint8_t *f, uint16_t n)
+{
+    static char line[512];
+    tinc_describe(f, n, line, sizeof line);
+    return line;
+}
+
+static void test_describe_golden(void)
+{
+    int i;
+
+    TEST_ASSERT_EQUAL_STRING("#1 HELLO v0.2 max_payload=256", describe(tv_hello_req, sizeof tv_hello_req));
+    TEST_ASSERT_EQUAL_STRING("#1 HELLO ok v0.2 max_payload=1024 heap=28000",
+                             describe(tv_hello_resp, sizeof tv_hello_resp));
+    TEST_ASSERT_EQUAL_STRING("#2 STATUS wifi=CONNECTED slot=0 rssi=-61 ip=192.168.1.42 heap=27500 req=IDLE wifi-locked",
+                             describe(tv_status_resp_locked, sizeof tv_status_resp_locked));
+    TEST_ASSERT_EQUAL_STRING("#3 REQ_BEGIN GET http://example.com/api?... transcode (headers: 26 bytes, not shown)",
+                             describe(tv_req_begin_req, sizeof tv_req_begin_req));
+    TEST_ASSERT_EQUAL_STRING("#4 REQ_STATUS BODY http=200 len=unknown type=application/json",
+                             describe(tv_req_status_resp, sizeof tv_req_status_resp));
+    TEST_ASSERT_EQUAL_STRING("#5 BODY_READ @0 max=128 wait=50ms", describe(tv_body_read_req, sizeof tv_body_read_req));
+    TEST_ASSERT_EQUAL_STRING("#6 BODY_READ @11 6 bytes EOF: \"\\\"n\\\":1}\"",
+                             describe(tv_body_read_resp_eof, sizeof tv_body_read_resp_eof));
+    TEST_ASSERT_EQUAL_STRING("#9 WIFI_LIST 0=\"HomeNet\" 1=\"\" 2=\"Phone\" (2 hidden)",
+                             describe(tv_wifi_list_resp, sizeof tv_wifi_list_resp));
+    TEST_ASSERT_EQUAL_STRING("#10 WIFI_SET slot 1 ssid=\"Phone\" (password not shown) hidden",
+                             describe(tv_wifi_set_req, sizeof tv_wifi_set_req));
+    TEST_ASSERT_EQUAL_STRING("#12 STATUS -> error NO_HELLO", describe(tv_err_no_hello, sizeof tv_err_no_hello));
+    TEST_ASSERT_EQUAL_STRING("#13 HELLO -> error VERSION (ESP is v0.3)", describe(tv_err_version, sizeof tv_err_version));
+    TEST_ASSERT_EQUAL_STRING("#16 WIFI_SET -> error LOCKED", describe(tv_err_locked, sizeof tv_err_locked));
+    TEST_ASSERT_EQUAL_STRING("#14 type 0x13 -> error UNSUPPORTED",
+                             describe(tv_err_unsupported, sizeof tv_err_unsupported));
+
+    /* every valid vector: something sensible, and never a secret */
+    for (i = 0; i < TINC_VALID_COUNT; i++) {
+        const char *s = describe(tinc_valid_vectors[i].data, tinc_valid_vectors[i].len);
+        TEST_ASSERT_TRUE_MESSAGE(s[0] == '#', tinc_valid_vectors[i].name);
+        TEST_ASSERT_NULL_MESSAGE(strstr(s, "hunter22"), tinc_valid_vectors[i].name);
+        TEST_ASSERT_NULL_MESSAGE(strstr(s, "Accept"), tinc_valid_vectors[i].name);
+        TEST_ASSERT_NULL_MESSAGE(strstr(s, "q=1"), tinc_valid_vectors[i].name);
+    }
+    /* truncated input never reads past len */
+    for (i = 0; i < (int)sizeof tv_req_begin_req; i++)
+        describe(tv_req_begin_req, (uint16_t)i);
+    TEST_ASSERT_EQUAL_STRING("(3 bytes, not a frame)", describe(tv_hello_req, 3));
+}
+
+static int traced_in, traced_out;
+static char traced_last[128];
+
+static void capture_trace(int from_ce, const uint8_t *f, uint16_t n)
+{
+    if (from_ce)
+        traced_in++;
+    else
+        traced_out++;
+    tinc_describe(f, n, traced_last, sizeof traced_last);
+}
+
+static void test_link_trace(void)
+{
+    uint8_t rd[TINC_READ_REQ_LEN] = {0, 0, 0, 0, 64, 0, 100};
+
+    traced_in = traced_out = 0;
+    tinc_link_set_trace(capture_trace);
+    uart_frame(TINC_T_HELLO, 1, hello_pl, sizeof hello_pl);
+    link_steps(1);
+    TEST_ASSERT_EQUAL(1, traced_in);
+    TEST_ASSERT_EQUAL(1, traced_out);
+    TEST_ASSERT_EQUAL_STRING_LEN("#1 HELLO ok", traced_last, 11);
+
+    /* a held BODY_READ is traced once in, once out, however long it waits */
+    fetch("http://x/", 0, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
+    uart_frame(TINC_T_BODY_READ, 2, rd, sizeof rd);
+    link_steps(5);
+    TEST_ASSERT_EQUAL(2, traced_in);
+    TEST_ASSERT_EQUAL(1, traced_out);
+    fk_serve("abcd");
+    tinc_poll();
+    link_steps(1);
+    TEST_ASSERT_EQUAL(2, traced_out);
+    TEST_ASSERT_EQUAL_STRING("#2 BODY_READ @0 4 bytes EOF: \"abcd\"", traced_last);
+    tinc_link_set_trace(NULL);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1050,5 +1137,7 @@ int main(void)
     RUN_TEST(test_link_interbyte_gap);
     RUN_TEST(test_link_partial_tx);
     RUN_TEST(test_link_long_poll);
+    RUN_TEST(test_describe_golden);
+    RUN_TEST(test_link_trace);
     return UNITY_END();
 }

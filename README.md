@@ -55,9 +55,22 @@ pio run -e pc                          # -> .pio/build/pc/program(.exe)
 The app waits for the port to appear and reopens it if the calculator is unplugged, which the calculator
 sees like a board reset. The PC can't join another network, so it reports itself as connected, shows all
 three Wi-Fi profiles as "Local Network", and keeps them locked (protocol 0.2's Wi-Fi lock): `WIFI_SET` and
-`WIFI_FORGET` get `ERR_LOCKED`, and every request goes out through the PC's own networking stack. Log lines
-(request states and errors) go to stderr; request
-headers are never logged. Releases attach prebuilt `tinclib-pc-*` binaries for Windows, Linux and macOS.
+`WIFI_FORGET` get `ERR_LOCKED`, and every request goes out through the PC's own networking stack.
+Releases attach prebuilt `tinclib-pc-*` binaries for Windows, Linux and macOS.
+
+Every packet is printed to stdout as it passes, one readable line each (`>` from the calculator, `<` the
+reply); log lines (request states and errors) go to stderr:
+
+```
+     3.102  calc > #2 HELLO v0.2 max_payload=256
+     3.103  calc < #2 HELLO ok v0.2 max_payload=1024 heap=1048576
+     3.210  calc > #5 REQ_BEGIN GET http://api.example.com/v1/items?... (headers: 31 bytes, not shown)
+     3.498  calc < #7 REQ_STATUS BODY http=200 len=812 type=application/json
+     3.520  calc < #8 BODY_READ @0 200 bytes: "{\"items\":[{\"id\":1,\"name\":\"first\"},{\"id\":2,\"n"...
+```
+
+The trace never shows request header text, URL query strings (they often carry API keys) or Wi-Fi
+passwords; it shows their lengths instead. Body data is cut to its first 48 bytes.
 
 `test/pc/e2e.py` tests it end to end: a pseudo-terminal plays the calculator and a local HTTP server the
 internet (Linux and macOS; CI runs it on both).

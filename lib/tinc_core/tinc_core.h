@@ -5,6 +5,7 @@
 #ifndef TINC_CORE_H
 #define TINC_CORE_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include "protocol.h"
 #include "tinc_platform.h"
@@ -30,6 +31,15 @@ void tinc_link_step(void);
 
 /* Once per loop: advance the request one step, run the watchdogs. */
 void tinc_poll(void);
+
+/* Optional: called with every whole frame the link receives (from_ce = 1)
+ * and every reply it sends (from_ce = 0). NULL turns tracing off. */
+typedef void (*tinc_trace_fn)(int from_ce, const uint8_t *frame, uint16_t len);
+void tinc_link_set_trace(tinc_trace_fn fn);
+
+/* One-line, human-readable description of a frame, for traces. Never shows
+ * header text, Wi-Fi passwords or URL query strings. */
+void tinc_describe(const uint8_t *frame, uint16_t len, char *buf, size_t cap);
 
 /* ---- dispatcher (used by the link; exposed for tests) ---- */
 
