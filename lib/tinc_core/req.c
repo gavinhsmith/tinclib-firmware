@@ -4,7 +4,7 @@
  * CE pulls it with BODY_READ, so unread data backs up into TCP flow control.
  */
 #include <string.h>
-#include "core.h"
+#include "tinc_core.h"
 
 #define RQ_MAX    TINC_PAYLOAD_LIMIT /* url + user headers, as sent in REQ_BEGIN */
 #define LINE_MAX  256                /* response header line */

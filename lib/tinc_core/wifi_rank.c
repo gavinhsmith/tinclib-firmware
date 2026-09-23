@@ -1,5 +1,5 @@
 #include <string.h>
-#include "core.h"
+#include "tinc_core.h"
 
 uint8_t tinc_wifi_rank(const tinc_slots *s, const tinc_scan *scan, uint8_t n,
                        tinc_cand *out)

@@ -4,7 +4,7 @@
 #define FAKE_PLATFORM_H
 
 #include <string.h>
-#include "core.h"
+#include "tinc_core.h"
 
 static uint32_t fk_now;
 static uint32_t fk_heap;
@@ -20,6 +20,8 @@ static uint16_t fk_sent_len, fk_write_max;
 static uint8_t fk_rx[8192];
 static uint16_t fk_rx_len, fk_rx_pos, fk_read_max;
 static char fk_log[8192];
+static uint8_t fk_uin[4096], fk_uout[4096];
+static uint16_t fk_uin_len, fk_uin_pos, fk_uout_len, fk_uart_room;
 
 static void fk_reset(void)
 {
@@ -36,6 +38,27 @@ static void fk_reset(void)
     fk_rx_len = fk_rx_pos = 0;
     fk_read_max = 0xFFFF;
     fk_log[0] = 0;
+    fk_uin_len = fk_uin_pos = fk_uout_len = 0;
+    fk_uart_room = 0xFFFF;
+}
+
+/* CE -> ESP bytes */
+static void fk_uart_in(const uint8_t *p, uint16_t n)
+{
+    memcpy(fk_uin + fk_uin_len, p, n);
+    fk_uin_len = (uint16_t)(fk_uin_len + n);
+}
+
+uint16_t tinc_plat_uart_available(void) { return (uint16_t)(fk_uin_len - fk_uin_pos); }
+uint8_t tinc_plat_uart_read(void) { return fk_uin[fk_uin_pos++]; }
+
+uint16_t tinc_plat_uart_write(const uint8_t *p, uint16_t n)
+{
+    if (n > fk_uart_room)
+        n = fk_uart_room;
+    memcpy(fk_uout + fk_uout_len, p, n);
+    fk_uout_len = (uint16_t)(fk_uout_len + n);
+    return n;
 }
 
 /* server -> ESP bytes */

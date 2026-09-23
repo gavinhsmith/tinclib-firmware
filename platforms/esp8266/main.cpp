@@ -1,8 +1,7 @@
 /*
- * ESP8266 platform layer: UART framing, Wi-Fi join, non-blocking TCP over
- * lwIP's raw API, LittleFS slot storage, debug log on Serial1 (GPIO2).
- * The only file that touches Arduino/ESP APIs; all protocol logic is in
- * lib/core.
+ * ESP8266 platform layer: UART, Wi-Fi join, non-blocking TCP over lwIP's
+ * raw API, LittleFS slot storage, debug log on Serial1 (GPIO2). Implements
+ * lib/tinc_core/tinc_platform.h; all protocol logic lives in the core.
  */
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
@@ -10,10 +9,7 @@
 #include <lwip/dns.h>
 #include <lwip/tcp.h>
 
-#include "core.h"
-extern "C" {
-#include "tinc_frame.h"
-}
+#include "tinc_core.h"
 
 #define SLOTS_FILE     "/wifi.bin"
 #define SLOTS_TMP      "/wifi.tmp"
@@ -296,7 +292,7 @@ extern "C" uint16_t tinc_plat_tcp_write(const uint8_t *p, uint16_t n)
     if (!pcb || tstate != TINC_TCP_OPEN)
         return 0;
     room = tcp_sndbuf(pcb);
-    if (n > room)
+    if (n > (uint16_t)room)
         n = room;
     if (!n || tcp_write(pcb, p, n, TCP_WRITE_FLAG_COPY) != ERR_OK)
         return 0;
@@ -329,58 +325,21 @@ extern "C" uint16_t tinc_plat_tcp_read(uint8_t *p, uint16_t n)
     return got;
 }
 
-/* ---- UART framing ---------------------------------------------------- */
+/* ---- UART link to the CE (framing lives in the core) ----------------- */
 
-static uint8_t rxbuf[TINC_FRAME_BUF(TINC_PAYLOAD_LIMIT)];
-static tinc_parser parser;
-static uint32_t last_byte_at;
-static bool pending;        /* BODY_READ long-poll in progress */
-static const uint8_t *tx;   /* reply being written out */
-static uint16_t tx_left;
+extern "C" uint16_t tinc_plat_uart_available(void) { return (uint16_t)Serial.available(); }
+extern "C" uint8_t tinc_plat_uart_read(void) { return (uint8_t)Serial.read(); }
 
-static void dispatch(void)
-{
-    uint16_t n = tinc_dispatch(parser.type, parser.seq, parser.payload, parser.len,
-                               Serial.available() > 0, &tx);
-    pending = n == TINC_PENDING;
-    tx_left = pending ? 0 : n;
-}
-
-/* Write what fits in the UART FIFO; never wait on it. */
-static void tx_step(void)
+/* Write only what fits in the UART FIFO; never wait on it. */
+extern "C" uint16_t tinc_plat_uart_write(const uint8_t *p, uint16_t n)
 {
     int room = Serial.availableForWrite();
-    uint16_t n;
 
-    if (!tx_left || room <= 0)
-        return;
-    n = tx_left < (uint16_t)room ? tx_left : (uint16_t)room;
-    Serial.write(tx, n);
-    tx += n;
-    tx_left = (uint16_t)(tx_left - n);
-}
-
-static void uart_step(void)
-{
-    uint8_t r;
-
-    tx_step();
-    if (tx_left)
-        return; /* the reply buffer is in use until it's sent */
-    if (pending) {
-        dispatch();
-        return;
-    }
-    if (Serial.available() && millis() - last_byte_at > TINC_INTERBYTE_RESET_MS)
-        tinc_parser_reset(&parser);
-    while (Serial.available()) {
-        last_byte_at = millis();
-        r = tinc_parser_feed(&parser, (uint8_t)Serial.read());
-        if (r == TINC_PARSE_FRAME) {
-            dispatch();
-            return; /* one frame per loop; the rest wait in the RX buffer */
-        }
-    }
+    if (room <= 0)
+        return 0;
+    if (n > (uint16_t)room)
+        n = (uint16_t)room;
+    return (uint16_t)Serial.write(p, n);
 }
 
 /* ---- entry points ---------------------------------------------------- */
@@ -402,13 +361,12 @@ void setup()
         slots_load();
     else
         Serial1.println("fs: mount failed, slots not loaded");
-    tinc_parser_init(&parser, rxbuf, sizeof rxbuf);
     Serial1.printf("heap: %u\n", ESP.getFreeHeap());
 }
 
 void loop()
 {
-    uart_step();
+    tinc_link_step();
     tinc_poll();
     wifi_step();
 }

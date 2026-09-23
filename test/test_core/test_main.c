@@ -788,6 +788,119 @@ static void test_wifi_rank_keeps_strongest_when_full(void)
     TEST_ASSERT_EQUAL(2, c[TINC_CAND_MAX - 1].scan);
 }
 
+/* ---- UART link ---- */
+
+static void uart_frame(uint8_t type, uint8_t seq, const uint8_t *pl, uint16_t len)
+{
+    static uint8_t f[TINC_FRAME_BUF(TINC_PAYLOAD_LIMIT)];
+    fk_uart_in(f, tinc_frame_encode(f, 0, type, seq, pl, len));
+}
+
+/* Parse everything the ESP wrote; returns the frame count, last one in *out. */
+static int uart_replies(tinc_parser *out)
+{
+    static uint8_t buf[TINC_FRAME_BUF(TINC_PAYLOAD_LIMIT)];
+    tinc_parser p;
+    int n = 0;
+    uint16_t i;
+
+    tinc_parser_init(&p, buf, sizeof buf);
+    for (i = 0; i < fk_uout_len; i++)
+        if (tinc_parser_feed(&p, fk_uout[i]) == TINC_PARSE_FRAME) {
+            *out = p;
+            n++;
+        }
+    return n;
+}
+
+static void link_steps(int n)
+{
+    while (n--)
+        tinc_link_step();
+}
+
+static const uint8_t hello_pl[] = {TINC_PROTO_MAJOR, TINC_PROTO_MINOR, 0, 0, 0, 4};
+
+static void test_link_roundtrip(void)
+{
+    static const uint8_t boot_noise[] = {0x00, 0xFF, 0x13, 0x37}; /* 74880-baud garbage */
+    tinc_parser r;
+
+    fk_uart_in(boot_noise, sizeof boot_noise);
+    uart_frame(TINC_T_HELLO, 1, hello_pl, sizeof hello_pl);
+    uart_frame(TINC_T_STATUS, 2, NULL, 0);
+    link_steps(1);
+    TEST_ASSERT_EQUAL(1, uart_replies(&r)); /* one frame per step */
+    link_steps(1);
+    TEST_ASSERT_EQUAL(2, uart_replies(&r));
+    TEST_ASSERT_EQUAL_HEX8(TINC_T_STATUS, r.type);
+    TEST_ASSERT_EQUAL_HEX8(TINC_FLAG_RESP, r.flags);
+    TEST_ASSERT_EQUAL(TINC_STATUS_RESP_LEN, r.len);
+}
+
+static void test_link_interbyte_gap(void)
+{
+    static uint8_t f[32];
+    uint16_t n = tinc_frame_encode(f, 0, TINC_T_HELLO, 1, hello_pl, sizeof hello_pl);
+    tinc_parser r;
+
+    fk_uart_in(f, 5); /* a frame cut off mid-header */
+    link_steps(1);
+    fk_now += TINC_INTERBYTE_RESET_MS + 1;
+    fk_uart_in(f, n);
+    link_steps(1);
+    TEST_ASSERT_EQUAL(1, uart_replies(&r));
+    TEST_ASSERT_EQUAL_HEX8(TINC_T_HELLO, r.type);
+}
+
+static void test_link_partial_tx(void)
+{
+    tinc_parser r;
+
+    fk_uart_room = 3;
+    uart_frame(TINC_T_HELLO, 1, hello_pl, sizeof hello_pl);
+    uart_frame(TINC_T_STATUS, 2, NULL, 0);
+    link_steps(1);
+    TEST_ASSERT_EQUAL(3, fk_uout_len);
+    link_steps(3); /* the HELLO reply (18 bytes) is still draining */
+    TEST_ASSERT_EQUAL(0, uart_replies(&r));
+    TEST_ASSERT_EQUAL(1, fk_uin_len - fk_uin_pos > 0);
+    link_steps(20);
+    TEST_ASSERT_EQUAL(2, uart_replies(&r));
+    TEST_ASSERT_EQUAL_HEX8(TINC_T_STATUS, r.type);
+}
+
+static void test_link_long_poll(void)
+{
+    uint8_t rd[TINC_READ_REQ_LEN] = {0, 0, 0, 0, 64, 0, 100};
+    tinc_parser r;
+
+    hello();
+    fetch("http://x/", 0, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
+    uart_frame(TINC_T_BODY_READ, 50, rd, sizeof rd);
+    link_steps(3);
+    TEST_ASSERT_EQUAL(0, uart_replies(&r)); /* held */
+
+    /* data arrives while held: answered on the next step */
+    fk_serve("abcd");
+    tinc_poll();
+    link_steps(1);
+    TEST_ASSERT_EQUAL(1, uart_replies(&r));
+    TEST_ASSERT_EQUAL(TINC_READ_DATA + 4, r.len);
+
+    /* a held read ends as soon as another frame is waiting */
+    fetch("http://x/", 0, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
+    uart_frame(TINC_T_BODY_READ, 51, rd, sizeof rd);
+    link_steps(1);
+    uart_frame(TINC_T_REQ_ABORT, 52, NULL, 0);
+    link_steps(1);
+    TEST_ASSERT_EQUAL(2, uart_replies(&r));
+    TEST_ASSERT_EQUAL(TINC_READ_DATA, r.len); /* empty, not EOF */
+    link_steps(1);
+    TEST_ASSERT_EQUAL(3, uart_replies(&r));
+    TEST_ASSERT_EQUAL_HEX8(TINC_T_REQ_ABORT, r.type);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -829,5 +942,9 @@ int main(void)
     RUN_TEST(test_transcode_unit);
     RUN_TEST(test_wifi_rank);
     RUN_TEST(test_wifi_rank_keeps_strongest_when_full);
+    RUN_TEST(test_link_roundtrip);
+    RUN_TEST(test_link_interbyte_gap);
+    RUN_TEST(test_link_partial_tx);
+    RUN_TEST(test_link_long_poll);
     return UNITY_END();
 }

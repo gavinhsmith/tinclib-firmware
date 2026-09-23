@@ -7,7 +7,7 @@
 
 #include <stdint.h>
 #include "protocol.h"
-#include "platform.h"
+#include "tinc_platform.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,13 +18,23 @@ struct tinc_slots {
     char pass[TINC_WIFI_SLOTS][TINC_PASS_MAX + 1]; /* write-only on the wire */
 };
 
-/* ---- dispatcher ---- */
-
-#define TINC_PENDING 0xFFFFu
+/* ---- entry points for a platform's main loop ---- */
 
 /* The platform fills tinc_core_slots() from flash after init. */
 void tinc_core_init(void);
 tinc_slots *tinc_core_slots(void);
+
+/* Once per loop: drain the UART, frame, dispatch, send the reply. */
+void tinc_link_step(void);
+
+/* Once per loop: advance the request one step, run the watchdogs. */
+void tinc_poll(void);
+
+/* ---- dispatcher (used by the link; exposed for tests) ---- */
+
+#define TINC_PENDING 0xFFFFu
+
+void tinc_link_init(void); /* called by tinc_core_init */
 
 /* Handle one parsed frame. Returns the reply frame length, written to
  * *reply, or TINC_PENDING while a BODY_READ is long-polling: call again
@@ -32,9 +42,6 @@ tinc_slots *tinc_core_slots(void);
  * as soon as any UART byte is waiting. */
 uint16_t tinc_dispatch(uint8_t type, uint8_t seq, const uint8_t *pl,
                        uint16_t len, int final, const uint8_t **reply);
-
-/* Once per loop: advance the request one step, run the watchdogs. */
-void tinc_poll(void);
 
 /* ---- request (used by the dispatcher; exposed for tests) ---- */
 

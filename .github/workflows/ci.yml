@@ -39,8 +39,8 @@ jobs:
         run: |
           mkdir -p build
           clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
-            -Iexternal/tinclib-protocol -Ilib/core -Itest \
-            -o build/fuzz_dispatch test/fuzz/fuzz_dispatch.c lib/core/*.c
+            -Iexternal/tinclib-protocol -Ilib/tinc_core -Itest \
+            -o build/fuzz_dispatch test/fuzz/fuzz_dispatch.c lib/tinc_core/*.c
           ./build/fuzz_dispatch -max_total_time=60
 
       - name: Fuzz frame parser (tinclib-protocol's target)
@@ -55,6 +55,9 @@ jobs:
     needs: [test, fuzz]
     permissions:
       contents: write
+    strategy:
+      matrix:
+        chip: [esp8266] # one entry per platforms/<chip>/
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,20 +70,27 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ matrix.chip }}-${{ hashFiles('platformio.ini') }}
 
       - run: pip install platformio
 
       - name: Build firmware
-        run: pio run -e esp12e
+        run: |
+          pio run -e ${{ matrix.chip }}
+          cp .pio/build/${{ matrix.chip }}/firmware.bin tinclib-firmware-${{ matrix.chip }}.bin
 
       - uses: actions/upload-artifact@v4
         with:
-          name: firmware
-          path: .pio/build/esp12e/firmware.bin
+          name: firmware-${{ matrix.chip }}
+          path: tinclib-firmware-${{ matrix.chip }}.bin
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" .pio/build/esp12e/firmware.bin --generate-notes
+        # whichever chip job gets here first creates the release; all upload to it
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --generate-notes ||
+            gh release view "$GITHUB_REF_NAME" >/dev/null
+          gh release upload "$GITHUB_REF_NAME" tinclib-firmware-${{ matrix.chip }}.bin --clobber

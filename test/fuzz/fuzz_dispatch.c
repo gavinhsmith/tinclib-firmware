@@ -4,7 +4,7 @@
  *   input = [tcp_state u8][server_len u8][server bytes]
  *           then frames: [type sel u8][seq u8][len u8][payload]
  * clang -g -fsanitize=fuzzer,address,undefined -Iexternal/tinclib-protocol \
- *   -Ilib/core -Itest test/fuzz/fuzz_dispatch.c lib/core/[a-z]*.c */
+ *   -Ilib/tinc_core -Itest test/fuzz/fuzz_dispatch.c lib/tinc_core/[a-z]*.c */
 #include <stddef.h>
 #include "fake_platform.h"
 #include "tinc_frame.h"
@@ -24,6 +24,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     uint16_t n;
 
     (void)fk_serve;
+    (void)fk_uart_in;
     if (size < 2)
         return 0;
     fk_reset();

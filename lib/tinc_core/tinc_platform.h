@@ -1,6 +1,6 @@
 /*
- * What the core needs from the platform. Implemented by src/main.cpp on the
- * ESP8266 and by test/fake_platform.h on a PC. Nothing here may block.
+ * What the core needs from a chip. Each platforms/<chip>/ implements these;
+ * test/fake_platform.h implements them on a PC. Nothing here may block.
  */
 #ifndef TINC_PLATFORM_H
 #define TINC_PLATFORM_H
@@ -31,6 +31,12 @@ enum {
 
 uint32_t tinc_plat_millis(void);
 uint32_t tinc_plat_free_heap(void);
+
+/* Link UART to the CE. write takes what fits in the TX buffer right now
+ * and returns that count. */
+uint16_t tinc_plat_uart_available(void);
+uint8_t tinc_plat_uart_read(void);
+uint16_t tinc_plat_uart_write(const uint8_t *p, uint16_t n);
 
 void tinc_plat_wifi_info(tinc_wifi_info *out);
 void tinc_plat_wifi_reconnect(void);

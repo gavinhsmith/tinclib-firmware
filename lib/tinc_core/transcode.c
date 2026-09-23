@@ -1,6 +1,6 @@
 /* Streaming UTF-8 -> calculator-safe ASCII. */
 #include <string.h>
-#include "core.h"
+#include "tinc_core.h"
 
 /* U+00C0..U+00FF folded to a base letter. */
 static const char latin1[] =

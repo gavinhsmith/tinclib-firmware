@@ -4,7 +4,7 @@
  * answered from it verbatim without re-running the command.
  */
 #include <string.h>
-#include "core.h"
+#include "tinc_core.h"
 #include "tinc_frame.h"
 
 #define CHUNK_MAX (TINC_PAYLOAD_LIMIT - TINC_READ_DATA)
@@ -42,6 +42,7 @@ void tinc_core_init(void)
     cache_ok = 0;
     tinc_req_release();
     reset_body();
+    tinc_link_init();
     last_rx = tinc_plat_millis();
 }
 
