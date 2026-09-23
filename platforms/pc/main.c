@@ -5,8 +5,10 @@
  *
  *   tinclib-pc PORT        e.g. COM7 or /dev/ttyACM0
  *
- * "Wi-Fi" is the PC's connection: always reported connected. Wi-Fi slots
- * the calculator saves are kept in memory only.
+ * "Wi-Fi" is the PC's own connection: the PC can't join another network,
+ * so all three profiles read "Local Network", the profiles are locked
+ * (protocol 0.2's Wi-Fi lock: WIFI_SET/WIFI_FORGET get ERR_LOCKED), and
+ * every request goes out through the PC's networking stack.
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -449,21 +451,33 @@ static void local_ip(uint8_t ip[4])
     sock_close(s);
 }
 
+#define LOCAL_NETWORK "Local Network"
+
+/* All three profiles are the PC's own network. */
+static void local_profiles(void)
+{
+    tinc_slots *s = tinc_core_slots();
+    uint8_t i;
+
+    memset(s, 0, sizeof *s);
+    for (i = 0; i < TINC_WIFI_SLOTS; i++)
+        strcpy(s->ssid[i], LOCAL_NETWORK);
+}
+
 void tinc_plat_wifi_info(tinc_wifi_info *out)
 {
     out->state = TINC_WIFI_CONNECTED;
-    out->slot = TINC_SLOT_NONE; /* not on one of the calculator's networks */
+    out->slot = 0; /* "Local Network": they're all the same */
     out->rssi = 0;
     local_ip(out->ip);
+    out->locked = 1; /* the calculator can't change which network the PC is on */
 }
 
+/* Unreachable while locked; kept because the platform interface needs them. */
 void tinc_plat_wifi_reconnect(void) {}
-
-/* ponytail: slots live in memory only; persist to a file if TINCLIBC testing needs them across runs */
 int tinc_plat_slots_save(const tinc_slots *s)
 {
     (void)s;
-    say("wifi: slots saved (in memory; the PC uses its own network)");
     return 0;
 }
 
@@ -490,6 +504,7 @@ int main(int argc, char **argv)
 #endif
     setvbuf(stderr, NULL, _IONBF, 0);
     tinc_core_init();
+    local_profiles();
     say("tinclib-pc: protocol v%d.%d, waiting for %s", TINC_PROTO_MAJOR, TINC_PROTO_MINOR, argv[1]);
 
     for (;;) {
@@ -505,12 +520,11 @@ int main(int argc, char **argv)
         tinc_poll();
         if (port_lost) {
             /* like a board reset: the calculator re-handshakes with HELLO */
-            tinc_slots keep = *tinc_core_slots();
             say("%s: lost; waiting for it to come back", argv[1]);
             port_close();
             tinc_plat_tcp_close();
             tinc_core_init();
-            *tinc_core_slots() = keep;
+            local_profiles();
             connected = 0;
             continue;
         }

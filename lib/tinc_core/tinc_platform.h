@@ -18,6 +18,7 @@ typedef struct {
     uint8_t slot;    /* TINC_SLOT_NONE when not connected */
     int8_t rssi;
     uint8_t ip[4];
+    uint8_t locked;  /* Wi-Fi profiles locked (build flag or switch); never set over the wire */
 } tinc_wifi_info;
 
 enum {

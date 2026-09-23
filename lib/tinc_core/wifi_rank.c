@@ -29,5 +29,19 @@ uint8_t tinc_wifi_rank(const tinc_slots *s, const tinc_scan *scan, uint8_t n,
         out[j].slot = slot;
         out[j].scan = i;
     }
+
+    /* A hidden slot never shows in a scan (unless it happens to answer
+     * someone's probe), so try it directly after everything that did. */
+    for (slot = 0; slot < TINC_WIFI_SLOTS; slot++) {
+        if (!s->ssid[slot][0] || !(s->wflags[slot] & TINC_WF_HIDDEN))
+            continue;
+        for (j = 0; j < cnt && out[j].slot != slot; j++)
+            ;
+        if (j < cnt)
+            continue; /* seen after all: already a ranked candidate */
+        out[cnt].slot = slot;
+        out[cnt].scan = TINC_CAND_DIRECT;
+        cnt++;
+    }
     return cnt;
 }

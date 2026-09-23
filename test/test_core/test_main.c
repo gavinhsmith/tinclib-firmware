@@ -226,8 +226,8 @@ static void test_golden_errors(void)
 
 static void test_golden_wifi(void)
 {
-    uint8_t home[] = {0, 7, 'H', 'o', 'm', 'e', 'N', 'e', 't', 0};
-    uint8_t phone[] = {2, 5, 'P', 'h', 'o', 'n', 'e', 8, 'h', 'u', 'n', 't', 'e', 'r', '2', '2'};
+    uint8_t home[] = {0, 7, 'H', 'o', 'm', 'e', 'N', 'e', 't', 0, 0};
+    uint8_t phone[] = {2, 5, 'P', 'h', 'o', 'n', 'e', 8, 'h', 'u', 'n', 't', 'e', 'r', '2', '2', TINC_WF_HIDDEN};
 
     hello();
     send(TINC_T_WIFI_SET, home, sizeof home);
@@ -240,10 +240,41 @@ static void test_golden_wifi(void)
     send_vec(tv_wifi_set_req, sizeof tv_wifi_set_req);
     expect_vec(tv_wifi_set_resp, sizeof tv_wifi_set_resp);
     TEST_ASSERT_EQUAL_STRING("hunter22", tinc_core_slots()->pass[1]);
+    TEST_ASSERT_EQUAL(TINC_WF_HIDDEN, tinc_core_slots()->wflags[1]);
     send_vec(tv_wifi_forget_req, sizeof tv_wifi_forget_req);
     expect_vec(tv_wifi_forget_resp, sizeof tv_wifi_forget_resp);
     TEST_ASSERT_EQUAL_STRING("", tinc_core_slots()->ssid[1]);
     TEST_ASSERT_EQUAL_STRING("", tinc_core_slots()->pass[1]);
+    TEST_ASSERT_EQUAL(0, tinc_core_slots()->wflags[1]);
+}
+
+/* 0.2 Wi-Fi lock: reported in STATUS; WIFI_SET/FORGET refused, LIST still works */
+static void test_golden_wifi_lock(void)
+{
+    uint8_t set[] = {1, 5, 'P', 'h', 'o', 'n', 'e', 0, 0};
+    uint8_t slot = 0;
+
+    send_vec(tv_hello_req, sizeof tv_hello_req);
+    strcpy(tinc_core_slots()->ssid[0], "Kept");
+    fk_wifi.locked = 1;
+    fk_heap = 27500;
+    fk_wifi.rssi = -61;
+    memcpy(fk_wifi.ip, "\xC0\xA8\x01\x2A", 4);
+    send_vec(tv_status_req, sizeof tv_status_req);
+    expect_vec(tv_status_resp_locked, sizeof tv_status_resp_locked);
+
+    send_final(TINC_T_WIFI_SET, 16, set, sizeof set, 1);
+    expect_vec(tv_err_locked, sizeof tv_err_locked);
+    send(TINC_T_WIFI_FORGET, &slot, 1);
+    expect_err(TINC_ERR_LOCKED);
+    TEST_ASSERT_EQUAL_STRING("Kept", tinc_core_slots()->ssid[0]);
+    TEST_ASSERT_EQUAL_STRING("", tinc_core_slots()->ssid[1]);
+    TEST_ASSERT_EQUAL(0, fk_saves);
+    TEST_ASSERT_EQUAL(0, fk_reconnects);
+
+    send(TINC_T_WIFI_LIST, NULL, 0);
+    expect_ok();
+    TEST_ASSERT_EQUAL_HEX8_ARRAY("\x04Kept\x00\x00\x00\x00\x00", RPL, 10);
 }
 
 /* ---- dispatcher ---- */
@@ -695,6 +726,22 @@ static void test_wifi_set_validation(void)
     TEST_ASSERT_EQUAL(1, fk_reconnects);
 }
 
+static void test_wifi_set_wflags(void)
+{
+    uint8_t no_flags[] = {0, 1, 'a', 0};             /* a 0.1-style payload: wflags missing */
+    uint8_t odd_flags[] = {1, 1, 'b', 0, 0xFF};      /* unknown bits are dropped */
+
+    hello();
+    send(TINC_T_WIFI_SET, no_flags, sizeof no_flags);
+    expect_ok();
+    TEST_ASSERT_EQUAL(0, tinc_core_slots()->wflags[0]);
+    send(TINC_T_WIFI_SET, odd_flags, sizeof odd_flags);
+    expect_ok();
+    TEST_ASSERT_EQUAL(TINC_WF_HIDDEN, tinc_core_slots()->wflags[1]);
+    send(TINC_T_WIFI_LIST, NULL, 0);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY("\x01" "a" "\x01" "b" "\x00" "\x00\x01\x00", RPL, 8);
+}
+
 static void test_wifi_list_hides_passwords(void)
 {
     uint8_t set[] = {0, 2, 'n', 'w', 9, 'p', 'a', 's', 's', 'w', 'o', 'r', 'd', '!'};
@@ -703,7 +750,7 @@ static void test_wifi_list_hides_passwords(void)
     send(TINC_T_WIFI_SET, set, sizeof set);
     send(TINC_T_WIFI_LIST, NULL, 0);
     expect_ok();
-    TEST_ASSERT_EQUAL(5, RPL_LEN); /* 2+"nw", 0, 0 */
+    TEST_ASSERT_EQUAL(8, RPL_LEN); /* 2+"nw", 0, 0, then 3 wflags */
     TEST_ASSERT_NULL(memchr(RPL, 'p', RPL_LEN));
 }
 
@@ -760,7 +807,7 @@ static void test_wifi_rank(void)
 {
     tinc_slots s;
     tinc_scan scan[5];
-    tinc_cand c[TINC_CAND_MAX];
+    tinc_cand c[TINC_CAND_CAP];
 
     memset(&s, 0, sizeof s);
     memset(scan, 0, sizeof scan);
@@ -787,7 +834,7 @@ static void test_wifi_rank_keeps_strongest_when_full(void)
 {
     tinc_slots s;
     tinc_scan scan[TINC_CAND_MAX + 2];
-    tinc_cand c[TINC_CAND_MAX];
+    tinc_cand c[TINC_CAND_CAP];
     uint8_t i;
 
     memset(&s, 0, sizeof s);
@@ -800,6 +847,45 @@ static void test_wifi_rank_keeps_strongest_when_full(void)
     TEST_ASSERT_EQUAL(TINC_CAND_MAX, tinc_wifi_rank(&s, scan, TINC_CAND_MAX + 2, c));
     TEST_ASSERT_EQUAL(TINC_CAND_MAX + 1, c[0].scan);
     TEST_ASSERT_EQUAL(2, c[TINC_CAND_MAX - 1].scan);
+
+    /* a hidden slot still gets its direct try when visible APs fill the list */
+    strcpy(s.ssid[0], "Secret");
+    s.wflags[0] = TINC_WF_HIDDEN;
+    TEST_ASSERT_EQUAL(TINC_CAND_MAX + 1, tinc_wifi_rank(&s, scan, TINC_CAND_MAX + 2, c));
+    TEST_ASSERT_EQUAL(0, c[TINC_CAND_MAX].slot);
+    TEST_ASSERT_EQUAL(TINC_CAND_DIRECT, c[TINC_CAND_MAX].scan);
+}
+
+static void test_wifi_rank_hidden(void)
+{
+    tinc_slots s;
+    tinc_scan scan[2];
+    tinc_cand c[TINC_CAND_CAP];
+
+    memset(&s, 0, sizeof s);
+    memset(scan, 0, sizeof scan);
+    strcpy(s.ssid[0], "Hidden");
+    s.wflags[0] = TINC_WF_HIDDEN;
+    strcpy(s.ssid[1], "Open");
+    strcpy(scan[0].ssid, "Open"); scan[0].rssi = -50;
+
+    /* visible matches first, then the hidden slot to be tried directly */
+    TEST_ASSERT_EQUAL(2, tinc_wifi_rank(&s, scan, 1, c));
+    TEST_ASSERT_EQUAL(1, c[0].slot);
+    TEST_ASSERT_EQUAL(0, c[0].scan);
+    TEST_ASSERT_EQUAL(0, c[1].slot);
+    TEST_ASSERT_EQUAL(TINC_CAND_DIRECT, c[1].scan);
+
+    /* nothing seen at all: the hidden slot is still a candidate */
+    TEST_ASSERT_EQUAL(1, tinc_wifi_rank(&s, scan, 0, c));
+    TEST_ASSERT_EQUAL(TINC_CAND_DIRECT, c[0].scan);
+
+    /* a "hidden" network that does show up is ranked normally, not twice */
+    strcpy(scan[1].ssid, "Hidden"); scan[1].rssi = -40;
+    TEST_ASSERT_EQUAL(2, tinc_wifi_rank(&s, scan, 2, c));
+    TEST_ASSERT_EQUAL(0, c[0].slot);
+    TEST_ASSERT_EQUAL(1, c[0].scan);
+    TEST_ASSERT_EQUAL(1, c[1].slot);
 }
 
 /* ---- UART link ---- */
@@ -921,6 +1007,9 @@ int main(void)
     RUN_TEST(test_golden_session);
     RUN_TEST(test_golden_errors);
     RUN_TEST(test_golden_wifi);
+    RUN_TEST(test_golden_wifi_lock);
+    RUN_TEST(test_wifi_set_wflags);
+    RUN_TEST(test_wifi_rank_hidden);
     RUN_TEST(test_version_mismatch);
     RUN_TEST(test_bad_len);
     RUN_TEST(test_seq_replay_does_not_rerun);

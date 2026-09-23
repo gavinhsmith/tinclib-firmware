@@ -16,6 +16,7 @@ extern "C" {
 struct tinc_slots {
     char ssid[TINC_WIFI_SLOTS][TINC_SSID_MAX + 1]; /* "" = empty slot */
     char pass[TINC_WIFI_SLOTS][TINC_PASS_MAX + 1]; /* write-only on the wire */
+    uint8_t wflags[TINC_WIFI_SLOTS];               /* TINC_WF_*; last, so 0.1 slot files still load */
 };
 
 /* ---- entry points for a platform's main loop ---- */
@@ -88,10 +89,15 @@ typedef struct {
 
 typedef struct {
     uint8_t slot;
-    uint8_t scan; /* index into the scan array */
+    uint8_t scan; /* index into the scan array, or TINC_CAND_DIRECT */
 } tinc_cand;
 
-/* Saved-SSID matches above the RSSI floor, strongest BSSID first. */
+#define TINC_CAND_DIRECT 0xFFu /* hidden slot not seen in the scan: join by SSID alone */
+#define TINC_CAND_CAP (TINC_CAND_MAX + TINC_WIFI_SLOTS) /* size of the out array */
+
+/* Saved-SSID matches above the RSSI floor, strongest BSSID first; then any
+ * hidden slot the scan didn't show, to be tried directly. out holds
+ * TINC_CAND_CAP entries. */
 uint8_t tinc_wifi_rank(const tinc_slots *s, const tinc_scan *scan, uint8_t n,
                        tinc_cand *out);
 

@@ -103,6 +103,7 @@ static uint16_t status(uint8_t seq)
     memcpy(PL + TINC_STATUS_IP, w.ip, 4);
     tinc_put_u32(PL + TINC_STATUS_FREE_HEAP, tinc_plat_free_heap());
     PL[TINC_STATUS_REQ_STATE] = tinc_req_state();
+    PL[TINC_STATUS_FLAGS] = w.locked ? TINC_STATUSF_WIFI_LOCKED : 0;
     return ok(TINC_T_STATUS, seq, TINC_STATUS_RESP_LEN);
 }
 
@@ -208,20 +209,33 @@ static uint16_t wifi_list(uint8_t seq)
     uint16_t n = 0;
     uint8_t i, l;
 
-    /* ponytail: 3 x 33 bytes can exceed a 64-byte peer max_payload; spec gap */
+    /* ponytail: 3 x 33 + 3 bytes can exceed a 64-byte peer max_payload; spec gap */
     for (i = 0; i < TINC_WIFI_SLOTS; i++) {
         l = (uint8_t)strlen(slots.ssid[i]);
         PL[n++] = l;
         memcpy(PL + n, slots.ssid[i], l);
         n = (uint16_t)(n + l);
     }
+    for (i = 0; i < TINC_WIFI_SLOTS; i++)
+        PL[n++] = slots.wflags[i];
     return ok(TINC_T_WIFI_LIST, seq, n);
+}
+
+/* The lock comes from the platform (build flag or switch), never the wire. */
+static int wifi_locked(void)
+{
+    tinc_wifi_info w;
+
+    tinc_plat_wifi_info(&w);
+    return w.locked;
 }
 
 static uint16_t wifi_set(uint8_t seq, const uint8_t *pl, uint16_t len)
 {
-    uint8_t slot, sl, pw;
+    uint8_t slot, sl, pw, wf;
 
+    if (wifi_locked())
+        return err(TINC_T_WIFI_SET, seq, TINC_ERR_LOCKED);
     if (len < TINC_WSET_SSID + 1u || len < TINC_WSET_SSID + 1u + pl[TINC_WSET_SSID_LEN])
         return err(TINC_T_WIFI_SET, seq, TINC_ERR_BAD_LEN);
     slot = pl[TINC_WSET_SLOT];
@@ -229,6 +243,8 @@ static uint16_t wifi_set(uint8_t seq, const uint8_t *pl, uint16_t len)
     pw = pl[TINC_WSET_SSID + sl];
     if (len < TINC_WSET_SSID + 1u + sl + pw)
         return err(TINC_T_WIFI_SET, seq, TINC_ERR_BAD_LEN);
+    /* wflags follows the password; unknown bits are dropped, not stored */
+    wf = len > TINC_WSET_SSID + 1u + sl + pw ? pl[TINC_WSET_SSID + 1 + sl + pw] & TINC_WF_HIDDEN : 0;
     /* open network (no password) or WPA 8..64 */
     if (slot >= TINC_WIFI_SLOTS || sl == 0 || sl > TINC_SSID_MAX ||
         pw > TINC_PASS_MAX || (pw && pw < 8))
@@ -238,7 +254,8 @@ static uint16_t wifi_set(uint8_t seq, const uint8_t *pl, uint16_t len)
     memset(slots.pass[slot], 0, sizeof slots.pass[slot]);
     memcpy(slots.ssid[slot], pl + TINC_WSET_SSID, sl);
     memcpy(slots.pass[slot], pl + TINC_WSET_SSID + sl + 1, pw);
-    /* ponytail: 0.1 has no storage error code; NO_MEM is the closest */
+    slots.wflags[slot] = wf;
+    /* ponytail: no storage error code yet; NO_MEM is the closest */
     if (tinc_plat_slots_save(&slots) != 0)
         return err(TINC_T_WIFI_SET, seq, TINC_ERR_NO_MEM);
     tinc_plat_wifi_reconnect();
@@ -250,6 +267,8 @@ static uint16_t wifi_forget(uint8_t seq, const uint8_t *pl, uint16_t len)
     tinc_wifi_info w;
     uint8_t slot;
 
+    if (wifi_locked())
+        return err(TINC_T_WIFI_FORGET, seq, TINC_ERR_LOCKED);
     if (len < 1)
         return err(TINC_T_WIFI_FORGET, seq, TINC_ERR_BAD_LEN);
     slot = pl[TINC_WFORGET_SLOT];
@@ -257,6 +276,7 @@ static uint16_t wifi_forget(uint8_t seq, const uint8_t *pl, uint16_t len)
         return err(TINC_T_WIFI_FORGET, seq, TINC_ERR_BAD_ARG);
     memset(slots.ssid[slot], 0, sizeof slots.ssid[slot]);
     memset(slots.pass[slot], 0, sizeof slots.pass[slot]);
+    slots.wflags[slot] = 0;
     if (tinc_plat_slots_save(&slots) != 0)
         return err(TINC_T_WIFI_FORGET, seq, TINC_ERR_NO_MEM);
     tinc_plat_wifi_info(&w);

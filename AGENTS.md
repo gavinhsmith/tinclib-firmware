@@ -15,7 +15,7 @@ core so every target gets it for free; a platform layer only adapts one
 target's APIs to the core's interface.
 
 Consumes `tinclib-protocol` as a **git submodule** at
-`external/tinclib-protocol`, pinned to a release tag (currently `v0.1.0`),
+`external/tinclib-protocol`, pinned to a release tag (currently `v0.2.0`),
 and compiled in place by `lib/tinc_core/proto.c`. **Never fork or hand-copy
 `protocol.h`/`crc16.c`/`tinc_frame.c` into this repo.** If the shared
 protocol seems to need a change to support something the firmware needs,
@@ -56,8 +56,10 @@ extend `tinc_platform.h` and `test/fake_platform.h` together.
 - **PC** (`platforms/pc/`, env `pc`): the firmware as a desktop app for
   Windows, Linux and macOS. The calculator plugs into the PC, `tinclib` runs
   in USB device mode (it accepts a PC host for exactly this), and the app
-  opens the serial port that appears. "Wi-Fi" is the PC's own connection and
-  always reports connected; saved slots stay in memory. It must behave like
+  opens the serial port that appears. "Wi-Fi" is the PC's own connection: it
+  always reports connected on slot 0, all three profiles read "Local Network",
+  and the profiles are permanently locked (0.2 Wi-Fi lock), so `WIFI_SET` /
+  `WIFI_FORGET` get `ERR_LOCKED`. It must behave like
   a board on the wire: same core, same errors, same non-blocking rules
   (DNS runs on a thread because `getaddrinfo` blocks). It is a development
   and no-hardware stand-in, not a replacement for the ESP targets.
@@ -204,9 +206,15 @@ runs the scan/join state machine with its chip's Wi-Fi API.
 - No roaming while connected — only rescan after a disconnect. A
   disconnect mid-request returns `ERR_WIFI_DOWN` to the CE; the app
   decides whether to retry, not the firmware.
-- Hidden networks need an explicit per-slot "hidden" flag (set via
-  TINCLIBC) and are tried directly, since they don't appear in scans.
-  (Not in protocol 0.1's `WIFI_SET` yet.)
+- Hidden networks have a per-slot `HIDDEN` flag (0.2 `WIFI_SET` wflags,
+  set via TINCLIBC). `tinc_wifi_rank` appends each hidden slot the scan
+  didn't show as a `TINC_CAND_DIRECT` candidate, tried after the visible
+  ones; the platform joins it by SSID alone.
+- **Wi-Fi lock** (0.2): comes from the platform only, via
+  `tinc_wifi_info.locked` — a build flag (`TINC_WIFI_LOCK` on the ESP8266)
+  or, later, a physical switch; always on for the PC target. Never settable
+  over the wire. The dispatcher enforces it (`ERR_LOCKED` on `WIFI_SET` /
+  `WIFI_FORGET`, `WIFI_LIST` still works) and STATUS reports it.
 - WPA2-Enterprise and captive-portal networks are **out of scope** — detect
   what's detectable in scan results and mark unsupported rather than
   silently failing to connect with no explanation. (The ESP8266 SDK doesn't

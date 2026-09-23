@@ -4,6 +4,7 @@
  * lib/tinc_core/tinc_platform.h; all protocol logic lives in the core.
  */
 #include <Arduino.h>
+#include <stddef.h>
 #include <ESP8266WiFi.h>
 #include <LittleFS.h>
 #include <lwip/dns.h>
@@ -17,6 +18,12 @@
 #define SCAN_TRIES     3      /* scans in a row before a join attempt round fails */
 #define JOIN_TIMEOUT   15000u /* per candidate */
 #define RETRY_AFTER_MS 30000u /* after every candidate failed */
+
+/* Wi-Fi lock (protocol 0.2): build with -D TINC_WIFI_LOCK=1 to stop the
+ * calculator changing the saved profiles. Never settable over the wire. */
+#ifndef TINC_WIFI_LOCK
+#define TINC_WIFI_LOCK 0
+#endif
 
 /* ---- debug log ------------------------------------------------------- */
 
@@ -34,10 +41,14 @@ static void slots_load(void)
 {
     File f = LittleFS.open(SLOTS_FILE, "r");
     tinc_slots tmp;
+    size_t n;
 
     if (!f)
         return;
-    if (f.read((uint8_t *)&tmp, sizeof tmp) == sizeof tmp) {
+    memset(&tmp, 0, sizeof tmp);
+    n = f.read((uint8_t *)&tmp, sizeof tmp);
+    /* a 0.1 file stops before wflags; those slots just aren't hidden */
+    if (n == sizeof tmp || n == offsetof(tinc_slots, wflags)) {
         uint8_t i;
         for (i = 0; i < TINC_WIFI_SLOTS; i++) { /* never trust flash for NULs */
             tmp.ssid[i][TINC_SSID_MAX] = 0;
@@ -69,7 +80,7 @@ enum { W_START, W_SCANNING, W_TRY, W_WAIT, W_UP, W_FAILED };
 
 static uint8_t ws = W_START;
 static tinc_scan scan[SCAN_MAX];
-static tinc_cand cand[TINC_CAND_MAX];
+static tinc_cand cand[TINC_CAND_CAP];
 static uint8_t n_cand, ci, scan_tries, slot_now = TINC_SLOT_NONE;
 static uint32_t ws_at;
 
@@ -77,6 +88,17 @@ static bool have_slots(void)
 {
     const tinc_slots *s = tinc_core_slots();
     return s->ssid[0][0] || s->ssid[1][0] || s->ssid[2][0];
+}
+
+/* Saved slots a scan should be able to see (not hidden). */
+static bool visible_slots(void)
+{
+    const tinc_slots *s = tinc_core_slots();
+    uint8_t i;
+    for (i = 0; i < TINC_WIFI_SLOTS; i++)
+        if (s->ssid[i][0] && !(s->wflags[i] & TINC_WF_HIDDEN))
+            return true;
+    return false;
 }
 
 extern "C" void tinc_plat_wifi_reconnect(void)
@@ -94,6 +116,7 @@ extern "C" void tinc_plat_wifi_info(tinc_wifi_info *out)
     out->slot = TINC_SLOT_NONE;
     out->rssi = 0;
     memset(out->ip, 0, 4);
+    out->locked = TINC_WIFI_LOCK;
     if (!have_slots()) {
         out->state = TINC_WIFI_NO_CREDS;
     } else if (ws == W_UP) {
@@ -155,8 +178,10 @@ static void wifi_step(void)
         n_cand = tinc_wifi_rank(s, scan, n, cand);
         ci = 0;
         Serial1.printf("wifi: %d seen, %u saved, %u candidates\n", r, n, n_cand);
-        /* one scan on a busy 2.4 GHz band often misses a beacon: rescan before giving up */
-        if (!n_cand && ++scan_tries < SCAN_TRIES) {
+        /* one scan on a busy 2.4 GHz band often misses a beacon: rescan before
+         * giving up, unless every saved slot is hidden (scans never show those) */
+        if ((!n_cand || cand[0].scan == TINC_CAND_DIRECT) && visible_slots() &&
+            ++scan_tries < SCAN_TRIES) {
             ws = W_START;
             break;
         }
@@ -171,9 +196,13 @@ static void wifi_step(void)
             return;
         }
         {
-            const tinc_scan *c = &scan[cand[ci].scan];
             const char *pw = s->pass[cand[ci].slot];
-            WiFi.begin(c->ssid, pw[0] ? pw : nullptr, c->channel, c->bssid, true);
+            if (cand[ci].scan == TINC_CAND_DIRECT) { /* hidden: probe for it by name */
+                WiFi.begin(s->ssid[cand[ci].slot], pw[0] ? pw : nullptr);
+            } else {
+                const tinc_scan *c = &scan[cand[ci].scan];
+                WiFi.begin(c->ssid, pw[0] ? pw : nullptr, c->channel, c->bssid, true);
+            }
         }
         ws = W_WAIT;
         ws_at = millis();
@@ -182,7 +211,7 @@ static void wifi_step(void)
         st = WiFi.status();
         if (st == WL_CONNECTED) {
             slot_now = cand[ci].slot;
-            Serial1.printf("wifi: up on slot %u, rssi %d\n", slot_now, scan[cand[ci].scan].rssi);
+            Serial1.printf("wifi: up on slot %u, rssi %d\n", slot_now, (int)WiFi.RSSI());
             ws = W_UP;
         } else if (st == WL_CONNECT_FAILED || st == WL_WRONG_PASSWORD ||
                    st == WL_NO_SSID_AVAIL || millis() - ws_at > JOIN_TIMEOUT) {

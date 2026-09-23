@@ -1,17 +1,18 @@
 # tinclib-firmware
 
 Firmware for the network co-processor that TINCLIB talks to. It speaks
-[tinclib-protocol](https://github.com/gavinhsmith/tinclib-protocol) **v0.1.0**
+[tinclib-protocol](https://github.com/gavinhsmith/tinclib-protocol) **v0.2.0**
 to the TI-84 Plus CE over UART, and handles the Wi-Fi and HTTP work for it.
-Protocol 0.1 covers plain-HTTP GET only. HTTPS, TLS, NTP and POST arrive with
+Protocol 0.2 covers plain-HTTP GET, three Wi-Fi profiles (hidden networks
+included) and a firmware-side Wi-Fi lock. HTTPS, TLS, NTP and POST arrive with
 later protocol versions.
 
 One shared core runs on every target. Each target adds a thin platform layer.
 
 | Target | Directory | PlatformIO env | Status |
 |---|---|---|---|
-| ESP8266 | `platforms/esp8266/` | `esp8266` | v0.1 |
-| PC (Windows, Linux, macOS) | `platforms/pc/` | `pc` | v0.1, calculator plugged into the PC |
+| ESP8266 | `platforms/esp8266/` | `esp8266` | protocol 0.2 |
+| PC (Windows, Linux, macOS) | `platforms/pc/` | `pc` | protocol 0.2, calculator plugged into the PC |
 | ESP32 | not started | | planned |
 
 ## Layout
@@ -52,8 +53,10 @@ pio run -e pc                          # -> .pio/build/pc/program(.exe)
 ```
 
 The app waits for the port to appear and reopens it if the calculator is unplugged, which the calculator
-sees like a board reset. "Wi-Fi" is always reported as connected (it's the PC's connection), and slots the
-calculator saves are kept in memory only. Log lines (request states and errors) go to stderr; request
+sees like a board reset. The PC can't join another network, so it reports itself as connected, shows all
+three Wi-Fi profiles as "Local Network", and keeps them locked (protocol 0.2's Wi-Fi lock): `WIFI_SET` and
+`WIFI_FORGET` get `ERR_LOCKED`, and every request goes out through the PC's own networking stack. Log lines
+(request states and errors) go to stderr; request
 headers are never logged. Releases attach prebuilt `tinclib-pc-*` binaries for Windows, Linux and macOS.
 
 `test/pc/e2e.py` tests it end to end: a pseudo-terminal plays the calculator and a local HTTP server the
@@ -78,19 +81,21 @@ interface doesn't offer, extend `tinc_platform.h` and the fake together.
 - TCP uses lwIP's raw API because `WiFiClient::connect()` blocks. The data
   the server sends is only acknowledged as the CE reads it, so a slow reader
   slows the download instead of filling RAM.
+- Wi-Fi lock: build with `-D TINC_WIFI_LOCK=1` (e.g. `build_flags` in `platformio.ini`) to stop the
+  calculator changing the saved profiles. There's no physical switch wired up yet.
+- Hidden networks (the `HIDDEN` slot flag) are joined by name after every network the scan did show.
+- Slots saved by 0.1 firmware still load after an upgrade, as non-hidden.
 - The debug log goes to Serial1 (GPIO2, TX only). The reset reason is logged
   at boot.
 - The ESP8266 SDK doesn't report WPA2-Enterprise in scan results, so those
   networks can't be flagged as unsupported. Joining them simply fails.
 
-## Known protocol gaps (0.1)
+## Known protocol gaps (0.2)
 
 - The `WIFI_SET` comment in `protocol.h` says the ESP joins "the first
   reachable slot, 0 → 2". This firmware ranks candidates by RSSI instead, as
   AGENTS.md requires. The protocol.h comment should be fixed upstream.
-- `WIFI_LIST` can be up to 99 bytes, which is more than a peer that
+- `WIFI_LIST` can be up to 102 bytes, which is more than a peer that
   advertised the 64-byte minimum `max_payload` can receive.
 - There is no error code for a storage failure. A failed slot write returns
   `ERR_NO_MEM`.
-- The hidden-SSID flag doesn't exist in `WIFI_SET` yet, so hidden networks
-  can't be joined.

@@ -110,10 +110,12 @@ def main():
 
         flags, r = link.call(0x02)  # before HELLO
         assert flags == 5 and r[0] == 0x02, "want ERR_NO_HELLO, got %r %r" % (flags, r)
-        flags, r = link.call(0x01, bytes([0, 1, 0, 0, 0, 4]))
-        assert flags == 1 and r[:2] == b"\x00\x01", "HELLO: %r %r" % (flags, r)
+        flags, r = link.call(0x01, bytes([0, 2, 0, 0, 0, 4]))
+        assert flags == 1 and r[:2] == b"\x00\x02", "HELLO: %r %r" % (flags, r)
         flags, r = link.call(0x02)
-        assert flags == 1 and r[0] == 2, "STATUS should say connected: %r" % r
+        assert flags == 1 and len(r) == 13, "STATUS: %r" % r
+        assert r[0] == 2 and r[1] == 0, "STATUS should say connected, slot 0: %r" % r
+        assert r[12] & 1, "STATUS should report the Wi-Fi lock: %r" % r
 
         err, status, body = get(link, base + "/data")
         assert (err, status, body) == (0, 200, BODY), "err=0x%02X status=%r len=%d" % (err, status, len(body or b""))
@@ -135,12 +137,17 @@ def main():
         assert err == 0x22, "want ERR_CONNECT, got 0x%02X" % err
         print("ok  refused port: ERR_CONNECT")
 
-        # WIFI_SET is accepted (kept in memory) and never read back
-        flags, _ = link.call(0x41, b"\x00\x04Home\x08password")
-        assert flags == 1
+        # the PC can't join other networks: profiles are locked, all "Local Network"
+        local = b"\x0dLocal Network"
         flags, r = link.call(0x40)
-        assert flags == 1 and r == b"\x04Home\x00\x00" and b"password" not in r, r
-        print("ok  WIFI_SET/WIFI_LIST")
+        assert flags == 1 and r == local * 3 + b"\x00\x00\x00", r
+        flags, r = link.call(0x41, b"\x00\x04Home\x08password\x00")
+        assert flags == 5 and r[0] == 0x0A, "WIFI_SET should be ERR_LOCKED: %r %r" % (flags, r)
+        flags, r = link.call(0x42, b"\x01")
+        assert flags == 5 and r[0] == 0x0A, "WIFI_FORGET should be ERR_LOCKED: %r %r" % (flags, r)
+        flags, r = link.call(0x40)
+        assert flags == 1 and r == local * 3 + b"\x00\x00\x00", r
+        print("ok  Wi-Fi profiles locked, all Local Network")
     finally:
         proc.terminate()
         proc.wait(5)
