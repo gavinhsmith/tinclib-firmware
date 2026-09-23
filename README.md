@@ -54,7 +54,7 @@ pio run -e pc                          # -> .pio/build/pc/program(.exe)
 
 The app waits for the port to appear and reopens it if the calculator is unplugged, which the calculator
 sees like a board reset. The PC can't join another network, so it reports itself as connected, shows all
-three Wi-Fi profiles as "Local Network", and keeps them locked (protocol 0.2's Wi-Fi lock): `WIFI_SET` and
+three Wi-Fi profiles as "LAN", and keeps them locked (protocol 0.2's Wi-Fi lock): `WIFI_SET` and
 `WIFI_FORGET` get `ERR_LOCKED`, and every request goes out through the PC's own networking stack.
 Releases attach prebuilt `tinclib-pc-*` binaries for Windows, Linux and macOS.
 

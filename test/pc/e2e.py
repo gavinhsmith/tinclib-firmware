@@ -144,8 +144,8 @@ def main():
         assert err == 0x22, "want ERR_CONNECT, got 0x%02X" % err
         print("ok  refused port: ERR_CONNECT")
 
-        # the PC can't join other networks: profiles are locked, all "Local Network"
-        local = b"\x0dLocal Network"
+        # the PC can't join other networks: profiles are locked, all "LAN"
+        local = b"\x03LAN"
         flags, r = link.call(0x40)
         assert flags == 1 and r == local * 3 + b"\x00\x00\x00", r
         flags, r = link.call(0x41, b"\x00\x04Home\x0ehunter22secret\x00")
@@ -154,7 +154,7 @@ def main():
         assert flags == 5 and r[0] == 0x0A, "WIFI_FORGET should be ERR_LOCKED: %r %r" % (flags, r)
         flags, r = link.call(0x40)
         assert flags == 1 and r == local * 3 + b"\x00\x00\x00", r
-        print("ok  Wi-Fi profiles locked, all Local Network")
+        print("ok  Wi-Fi profiles locked, all LAN")
     finally:
         proc.terminate()
         proc.wait(5)
@@ -166,7 +166,7 @@ def main():
     for want in ("calc > #1 STATUS?", "calc < #1 STATUS -> error NO_HELLO", "HELLO ok v0.2",
                  "REQ_BEGIN GET http://127.0.0.1:", "/data?...", "REQ_STATUS BODY http=200",
                  "BODY_READ @0 max=200 wait=50ms", "bytes EOF", "WIFI_SET -> error LOCKED",
-                 'WIFI_LIST 0="Local Network"'):
+                 'WIFI_LIST 0="LAN"'):
         assert want in log, "trace is missing %r" % want
     for secret in ("s3cret", "hunter22secret"):
         assert secret not in log, "trace leaked %r" % secret

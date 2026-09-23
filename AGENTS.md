@@ -58,7 +58,7 @@ extend `tinc_platform.h` and `test/fake_platform.h` together.
   Windows, Linux and macOS. The calculator plugs into the PC, `tinclib` runs
   in USB device mode (it accepts a PC host for exactly this), and the app
   opens the serial port that appears. "Wi-Fi" is the PC's own connection: it
-  always reports connected on slot 0, all three profiles read "Local Network",
+  always reports connected on slot 0, all three profiles read "LAN",
   and the profiles are permanently locked (0.2 Wi-Fi lock), so `WIFI_SET` /
   `WIFI_FORGET` get `ERR_LOCKED`. It must behave like
   a board on the wire: same core, same errors, same non-blocking rules
