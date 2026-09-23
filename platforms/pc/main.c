@@ -96,19 +96,42 @@ static void sleep_ms(unsigned ms)
 
 static int port_lost;
 
+/* The port is gone (calculator unplugged, or its program ended). */
+static void lose(const char *what, unsigned long code)
+{
+    if (!port_lost)
+        say("serial: %s failed (error %lu)", what, code);
+    port_lost = 1;
+}
+
 #ifdef _WIN32
 static HANDLE port = INVALID_HANDLE_VALUE;
+
+/* Overlapped I/O. A write is handed to the driver whole and allowed to finish
+ * whenever the calculator is ready; it is never cancelled. The calculator
+ * only services USB between its own work (e.g. while it isn't drawing), and a
+ * write timeout that cancels a multi-packet transfer halfway wedges it: the
+ * next writes fail with ERROR_GEN_FAILURE / ERROR_BAD_COMMAND. */
+static OVERLAPPED rov, wov;
+static uint8_t wbuf[TINC_PAYLOAD_LIMIT + TINC_OVERHEAD]; /* one whole frame */
+static int writing;
 
 static int port_open(const char *name)
 {
     char path[64];
     DCB d;
-    COMMTIMEOUTS t = {MAXDWORD, 0, 0, 0, 20}; /* reads never wait; writes give up after 20 ms */
+    COMMTIMEOUTS t = {MAXDWORD, 0, 0, 0, 0}; /* reads return at once; writes never time out */
 
     snprintf(path, sizeof path, "\\\\.\\%s", name);
-    port = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    port = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                       FILE_FLAG_OVERLAPPED, NULL);
     if (port == INVALID_HANDLE_VALUE)
         return -1;
+    memset(&rov, 0, sizeof rov);
+    memset(&wov, 0, sizeof wov);
+    rov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+    wov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+    writing = 0;
     memset(&d, 0, sizeof d);
     d.DCBlength = sizeof d;
     GetCommState(port, &d);
@@ -129,8 +152,14 @@ static int port_open(const char *name)
 static void port_close(void)
 {
     if (port != INVALID_HANDLE_VALUE)
-        CloseHandle(port);
+        CloseHandle(port); /* cancels a write still in flight */
     port = INVALID_HANDLE_VALUE;
+    if (rov.hEvent)
+        CloseHandle(rov.hEvent);
+    if (wov.hEvent)
+        CloseHandle(wov.hEvent);
+    rov.hEvent = wov.hEvent = NULL;
+    writing = 0;
 }
 
 uint16_t tinc_plat_uart_available(void)
@@ -138,32 +167,59 @@ uint16_t tinc_plat_uart_available(void)
     COMSTAT st;
     DWORD errs;
 
-    if (port_lost || !ClearCommError(port, &errs, &st)) {
-        port_lost = 1;
+    if (port_lost)
+        return 0;
+    if (!ClearCommError(port, &errs, &st)) {
+        lose("status", GetLastError());
         return 0;
     }
     return st.cbInQue > 0xFFFF ? 0xFFFF : (uint16_t)st.cbInQue;
 }
 
+/* Only called when uart_available() says a byte is waiting; with the read
+ * timeouts above it completes at once. */
 uint8_t tinc_plat_uart_read(void)
 {
     uint8_t b = 0;
-    DWORD n;
-
-    if (!port_lost && !ReadFile(port, &b, 1, &n, NULL))
-        port_lost = 1;
-    return b;
-}
-
-uint16_t tinc_plat_uart_write(const uint8_t *p, uint16_t n)
-{
-    DWORD w = 0;
+    DWORD n = 0;
 
     if (port_lost)
         return 0;
-    if (!WriteFile(port, p, n, &w, NULL) && GetLastError() != ERROR_TIMEOUT)
-        port_lost = 1;
-    return (uint16_t)w;
+    if (!ReadFile(port, &b, 1, &n, &rov) &&
+        (GetLastError() != ERROR_IO_PENDING || !GetOverlappedResult(port, &rov, &n, TRUE)))
+        lose("read", GetLastError());
+    return b;
+}
+
+/* Takes nothing while the previous write is still in flight; otherwise copies
+ * the bytes out and starts the write. */
+uint16_t tinc_plat_uart_write(const uint8_t *p, uint16_t n)
+{
+    DWORD w, e;
+
+    if (port_lost)
+        return 0;
+    if (writing) {
+        if (!GetOverlappedResult(port, &wov, &w, FALSE)) {
+            e = GetLastError();
+            if (e != ERROR_IO_INCOMPLETE)
+                lose("write", e);
+            return 0;
+        }
+        writing = 0;
+    }
+    if (n > sizeof wbuf)
+        n = sizeof wbuf;
+    memcpy(wbuf, p, n);
+    if (!WriteFile(port, wbuf, n, NULL, &wov)) {
+        e = GetLastError();
+        if (e != ERROR_IO_PENDING) {
+            lose("write", e);
+            return 0;
+        }
+        writing = 1;
+    }
+    return n;
 }
 #else
 static int port = -1;
@@ -197,8 +253,10 @@ uint16_t tinc_plat_uart_available(void)
 {
     int n = 0;
 
-    if (port_lost || ioctl(port, FIONREAD, &n) < 0) {
-        port_lost = 1;
+    if (port_lost)
+        return 0;
+    if (ioctl(port, FIONREAD, &n) < 0) {
+        lose("status", (unsigned long)errno);
         return 0;
     }
     return n > 0xFFFF ? 0xFFFF : (uint16_t)n;
@@ -209,7 +267,7 @@ uint8_t tinc_plat_uart_read(void)
     uint8_t b = 0;
 
     if (!port_lost && read(port, &b, 1) != 1)
-        port_lost = 1;
+        lose("read", (unsigned long)errno);
     return b;
 }
 
@@ -221,7 +279,7 @@ uint16_t tinc_plat_uart_write(const uint8_t *p, uint16_t n)
         return 0;
     w = write(port, p, n);
     if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-        port_lost = 1;
+        lose("write", (unsigned long)errno);
     return w > 0 ? (uint16_t)w : 0;
 }
 #endif
