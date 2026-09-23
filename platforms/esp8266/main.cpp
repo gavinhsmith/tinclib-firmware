@@ -14,6 +14,7 @@
 #define SLOTS_FILE     "/wifi.bin"
 #define SLOTS_TMP      "/wifi.tmp"
 #define SCAN_MAX       16
+#define SCAN_TRIES     3      /* scans in a row before a join attempt round fails */
 #define JOIN_TIMEOUT   15000u /* per candidate */
 #define RETRY_AFTER_MS 30000u /* after every candidate failed */
 
@@ -69,7 +70,7 @@ enum { W_START, W_SCANNING, W_TRY, W_WAIT, W_UP, W_FAILED };
 static uint8_t ws = W_START;
 static tinc_scan scan[SCAN_MAX];
 static tinc_cand cand[TINC_CAND_MAX];
-static uint8_t n_cand, ci, slot_now = TINC_SLOT_NONE;
+static uint8_t n_cand, ci, scan_tries, slot_now = TINC_SLOT_NONE;
 static uint32_t ws_at;
 
 static bool have_slots(void)
@@ -110,6 +111,7 @@ static void wifi_step(void)
 {
     const tinc_slots *s = tinc_core_slots();
     int r, i;
+    uint8_t n;
     wl_status_t st;
 
     switch (ws) {
@@ -128,22 +130,37 @@ static void wifi_step(void)
             ws_at = millis();
             return;
         }
-        if (r > SCAN_MAX)
-            r = SCAN_MAX; /* ponytail: first 16 results only; fine outside dense venues */
-        for (i = 0; i < r; i++) {
-            strncpy(scan[i].ssid, WiFi.SSID(i).c_str(), TINC_SSID_MAX);
-            scan[i].ssid[TINC_SSID_MAX] = 0;
-            memcpy(scan[i].bssid, WiFi.BSSID(i), 6);
-            scan[i].rssi = (int8_t)WiFi.RSSI(i);
-            scan[i].channel = (uint8_t)WiFi.channel(i);
+        /* Keep only APs broadcasting a saved SSID: a busy area easily has more
+         * results than SCAN_MAX, in no useful order. */
+        n = 0;
+        for (i = 0; i < r && n < SCAN_MAX; i++) {
+            tinc_scan *e = &scan[n];
+            uint8_t k;
+            strncpy(e->ssid, WiFi.SSID(i).c_str(), TINC_SSID_MAX);
+            e->ssid[TINC_SSID_MAX] = 0;
+            for (k = 0; k < TINC_WIFI_SLOTS; k++)
+                if (s->ssid[k][0] && !strcmp(s->ssid[k], e->ssid))
+                    break;
+            if (k == TINC_WIFI_SLOTS)
+                continue;
+            memcpy(e->bssid, WiFi.BSSID(i), 6);
+            e->rssi = (int8_t)WiFi.RSSI(i);
+            e->channel = (uint8_t)WiFi.channel(i);
             /* The ESP8266 SDK doesn't report 802.1X in scan results, so
              * enterprise networks can't be flagged here; they fail to join. */
-            scan[i].enterprise = 0;
+            e->enterprise = 0;
+            n++;
         }
         WiFi.scanDelete();
-        n_cand = tinc_wifi_rank(s, scan, (uint8_t)r, cand);
+        n_cand = tinc_wifi_rank(s, scan, n, cand);
         ci = 0;
-        Serial1.printf("wifi: %d seen, %u candidates\n", r, n_cand);
+        Serial1.printf("wifi: %d seen, %u saved, %u candidates\n", r, n, n_cand);
+        /* one scan on a busy 2.4 GHz band often misses a beacon: rescan before giving up */
+        if (!n_cand && ++scan_tries < SCAN_TRIES) {
+            ws = W_START;
+            break;
+        }
+        scan_tries = 0;
         ws = W_TRY;
         break;
     case W_TRY:

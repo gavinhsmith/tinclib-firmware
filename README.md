@@ -41,20 +41,21 @@ when it is invoked from Git Bash.
 
 `tools/serial/` has scripts for
 [serial-passthrough](https://github.com/gavinhsmith/serial-passthrough) that stand in for the calculator
-over the board's USB port. `tinc.spec` decodes TINCLIB frames and checks their CRCs, and each script
+over the board's USB port. `tinc.spec` decodes TINCLIB frames and checks their CRCs, `tinc.tmpl` shows
+each one as a readable line (`#4 STATUS wifi=CONNECTED rssi=-56 ...`), and each script
 sends frames and `expect`s the replies. A script exits 0 when every reply matches and 1 at the first
 mismatch.
 
 ```powershell
 # handshake, reply cache, error replies (no Wi-Fi needed)
-Get-Content tools/serial/link.txt | serial-passthrough -a COM5 -p tools/serial/tinc.spec
+Get-Content tools/serial/link.txt | serial-passthrough -a COM5 -p tools/serial/tinc.spec -t tools/serial/tinc.tmpl
 
 # save your network once (wifi.txt is gitignored); the slot persists in flash
 Copy-Item tools/serial/wifi.example.txt tools/serial/wifi.txt   # then edit it
-Get-Content tools/serial/wifi.txt | serial-passthrough -a COM5 -p tools/serial/tinc.spec
+Get-Content tools/serial/wifi.txt | serial-passthrough -a COM5 -p tools/serial/tinc.spec -t tools/serial/tinc.tmpl
 
 # GET http://example.com/ end to end
-Get-Content tools/serial/fetch.txt | serial-passthrough -a COM5 -p tools/serial/tinc.spec
+Get-Content tools/serial/fetch.txt | serial-passthrough -a COM5 -p tools/serial/tinc.spec -t tools/serial/tinc.tmpl
 ```
 
 Opening the port usually resets the board, so each script starts with `wait 2000`. Watch the Serial1
