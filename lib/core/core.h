@@ -1,0 +1,95 @@
+/*
+ * Firmware core: dispatcher, request state machine, HTTP parsing,
+ * transcoding and Wi-Fi ranking. Pure C, no Arduino calls; see AGENTS.md.
+ */
+#ifndef TINC_CORE_H
+#define TINC_CORE_H
+
+#include <stdint.h>
+#include "protocol.h"
+#include "platform.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+struct tinc_slots {
+    char ssid[TINC_WIFI_SLOTS][TINC_SSID_MAX + 1]; /* "" = empty slot */
+    char pass[TINC_WIFI_SLOTS][TINC_PASS_MAX + 1]; /* write-only on the wire */
+};
+
+/* ---- dispatcher ---- */
+
+#define TINC_PENDING 0xFFFFu
+
+/* The platform fills tinc_core_slots() from flash after init. */
+void tinc_core_init(void);
+tinc_slots *tinc_core_slots(void);
+
+/* Handle one parsed frame. Returns the reply frame length, written to
+ * *reply, or TINC_PENDING while a BODY_READ is long-polling: call again
+ * with the same frame (don't feed the parser meanwhile), passing final=1
+ * as soon as any UART byte is waiting. */
+uint16_t tinc_dispatch(uint8_t type, uint8_t seq, const uint8_t *pl,
+                       uint16_t len, int final, const uint8_t **reply);
+
+/* Once per loop: advance the request one step, run the watchdogs. */
+void tinc_poll(void);
+
+/* ---- request (used by the dispatcher; exposed for tests) ---- */
+
+uint8_t tinc_req_begin(uint8_t flags, uint8_t timeout_s,
+                       const char *url, uint16_t url_len,
+                       const char *hdrs, uint16_t hdr_len);
+void tinc_req_release(void);
+void tinc_req_poll(void);
+uint8_t tinc_req_state(void);
+uint8_t tinc_req_err(void);
+uint16_t tinc_req_http_status(void);
+uint32_t tinc_req_content_len(void);
+const char *tinc_req_ctype(void);
+/* Fill up to cap decoded body bytes; *eof set once the body is complete. */
+uint16_t tinc_req_read(uint8_t *out, uint16_t cap, int *eof);
+void tinc_req_mark_done(void);
+
+/* ---- ASCII transcoding ---- */
+
+#define TINC_TC_MAX_OUT 4 /* most bytes one input byte can produce */
+
+typedef struct {
+    uint32_t cp;
+    uint8_t need;
+} tinc_tc;
+
+int tinc_tc_applies(const char *ctype);
+/* Returns bytes written to out (<= TINC_TC_MAX_OUT). */
+uint8_t tinc_tc_byte(tinc_tc *t, uint8_t b, uint8_t *out);
+uint8_t tinc_tc_flush(tinc_tc *t, uint8_t *out);
+
+/* ---- Wi-Fi candidate ranking ---- */
+
+#define TINC_RSSI_FLOOR (-85)
+#define TINC_CAND_MAX 8
+
+typedef struct {
+    char ssid[TINC_SSID_MAX + 1];
+    uint8_t bssid[6];
+    int8_t rssi;
+    uint8_t channel;
+    uint8_t enterprise;
+} tinc_scan;
+
+typedef struct {
+    uint8_t slot;
+    uint8_t scan; /* index into the scan array */
+} tinc_cand;
+
+/* Saved-SSID matches above the RSSI floor, strongest BSSID first. */
+uint8_t tinc_wifi_rank(const tinc_slots *s, const tinc_scan *scan, uint8_t n,
+                       tinc_cand *out);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

@@ -1,0 +1,106 @@
+/* PC stand-in for the platform layer: scripted TCP, fake clock, in-memory
+ * slots. Include from exactly one translation unit. */
+#ifndef FAKE_PLATFORM_H
+#define FAKE_PLATFORM_H
+
+#include <string.h>
+#include "core.h"
+
+static uint32_t fk_now;
+static uint32_t fk_heap;
+static tinc_wifi_info fk_wifi;
+static int fk_reconnects, fk_saves, fk_save_fail;
+
+static uint8_t fk_tcp;
+static char fk_host[64];
+static uint16_t fk_port;
+static int fk_opens;
+static char fk_sent[4096];
+static uint16_t fk_sent_len, fk_write_max;
+static uint8_t fk_rx[8192];
+static uint16_t fk_rx_len, fk_rx_pos, fk_read_max;
+static char fk_log[8192];
+
+static void fk_reset(void)
+{
+    fk_now = 1000;
+    fk_heap = 28000;
+    memset(&fk_wifi, 0, sizeof fk_wifi);
+    fk_wifi.state = TINC_WIFI_CONNECTED;
+    fk_reconnects = fk_saves = fk_save_fail = 0;
+    fk_tcp = TINC_TCP_IDLE;
+    fk_host[0] = 0;
+    fk_opens = 0;
+    fk_sent_len = 0;
+    fk_write_max = 0xFFFF;
+    fk_rx_len = fk_rx_pos = 0;
+    fk_read_max = 0xFFFF;
+    fk_log[0] = 0;
+}
+
+/* server -> ESP bytes */
+static void fk_serve(const char *s)
+{
+    uint16_t n = (uint16_t)strlen(s);
+    memcpy(fk_rx + fk_rx_len, s, n);
+    fk_rx_len = (uint16_t)(fk_rx_len + n);
+}
+
+uint32_t tinc_plat_millis(void) { return fk_now; }
+uint32_t tinc_plat_free_heap(void) { return fk_heap; }
+void tinc_plat_wifi_info(tinc_wifi_info *out) { *out = fk_wifi; }
+void tinc_plat_wifi_reconnect(void) { fk_reconnects++; }
+
+int tinc_plat_slots_save(const tinc_slots *s)
+{
+    (void)s;
+    fk_saves++;
+    return fk_save_fail;
+}
+
+int tinc_plat_tcp_open(const char *host, uint16_t port)
+{
+    strncpy(fk_host, host, sizeof fk_host - 1);
+    fk_port = port;
+    fk_opens++;
+    fk_tcp = TINC_TCP_BUSY;
+    fk_sent_len = 0;
+    fk_rx_len = fk_rx_pos = 0;
+    return 0;
+}
+
+uint8_t tinc_plat_tcp_state(void) { return fk_tcp; }
+
+uint16_t tinc_plat_tcp_write(const uint8_t *p, uint16_t n)
+{
+    if (n > fk_write_max)
+        n = fk_write_max;
+    memcpy(fk_sent + fk_sent_len, p, n);
+    fk_sent_len = (uint16_t)(fk_sent_len + n);
+    fk_sent[fk_sent_len] = 0;
+    return n;
+}
+
+uint16_t tinc_plat_tcp_read(uint8_t *p, uint16_t n)
+{
+    uint16_t left = (uint16_t)(fk_rx_len - fk_rx_pos);
+    if (n > left)
+        n = left;
+    if (n > fk_read_max)
+        n = fk_read_max;
+    memcpy(p, fk_rx + fk_rx_pos, n);
+    fk_rx_pos = (uint16_t)(fk_rx_pos + n);
+    return n;
+}
+
+void tinc_plat_tcp_close(void) { fk_tcp = TINC_TCP_IDLE; }
+
+void tinc_plat_log(const char *msg)
+{
+    if (strlen(fk_log) + strlen(msg) + 2 < sizeof fk_log) {
+        strcat(fk_log, msg);
+        strcat(fk_log, "\n");
+    }
+}
+
+#endif
