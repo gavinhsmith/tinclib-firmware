@@ -1,0 +1,3 @@
+[submodule "external/tinclib-protocol"]
+	path = external/tinclib-protocol
+	url = https://github.com/gavinhsmith/tinclib-protocol
