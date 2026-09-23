@@ -7,6 +7,7 @@
 #include "tinc_core.h"
 
 static uint32_t fk_now;
+static int fk_tick; /* advance the clock 1 ms on every read, like a real 1 ms timer */
 static uint32_t fk_heap;
 static tinc_wifi_info fk_wifi;
 static int fk_reconnects, fk_saves, fk_save_fail;
@@ -26,6 +27,7 @@ static uint16_t fk_uin_len, fk_uin_pos, fk_uout_len, fk_uart_room;
 static void fk_reset(void)
 {
     fk_now = 1000;
+    fk_tick = 0;
     fk_heap = 28000;
     memset(&fk_wifi, 0, sizeof fk_wifi);
     fk_wifi.state = TINC_WIFI_CONNECTED;
@@ -69,7 +71,7 @@ static void fk_serve(const char *s)
     fk_rx_len = (uint16_t)(fk_rx_len + n);
 }
 
-uint32_t tinc_plat_millis(void) { return fk_now; }
+uint32_t tinc_plat_millis(void) { return fk_tick ? fk_now++ : fk_now; }
 uint32_t tinc_plat_free_heap(void) { return fk_heap; }
 void tinc_plat_wifi_info(tinc_wifi_info *out) { *out = fk_wifi; }
 void tinc_plat_wifi_reconnect(void) { fk_reconnects++; }

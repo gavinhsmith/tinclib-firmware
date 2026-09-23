@@ -571,8 +571,9 @@ void tinc_req_poll(void)
         }
         break;
     }
+    /* fresh clock: a state change above may have set phase_at after `now` */
     if (r.state >= TINC_RS_CONNECTING && r.state <= TINC_RS_BODY &&
-        now - r.phase_at > r.timeout_ms)
+        tinc_plat_millis() - r.phase_at > r.timeout_ms)
         fail(TINC_ERR_TIMEOUT);
 }
 

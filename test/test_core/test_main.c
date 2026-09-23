@@ -598,6 +598,20 @@ static void test_connect_timeout(void)
     TEST_ASSERT_EQUAL(TINC_ERR_TIMEOUT, tinc_req_err());
 }
 
+/* A state change mid-poll stamps the phase with a later millisecond than the
+ * poll's own start time; the timeout check must not see that as ~49 days. */
+static void test_clock_ticking_during_poll(void)
+{
+    char body[64];
+
+    hello();
+    fk_tick = 1;
+    fetch("http://x/", 0, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello");
+    TEST_ASSERT_EQUAL(TINC_RS_BODY, tinc_req_state());
+    TEST_ASSERT_EQUAL(5, read_all(body, 64));
+    TEST_ASSERT_EQUAL_STRING("hello", body);
+}
+
 static void test_body_gap_timeout(void)
 {
     hello();
@@ -930,6 +944,7 @@ int main(void)
     RUN_TEST(test_long_poll);
     RUN_TEST(test_done_linger);
     RUN_TEST(test_connect_timeout);
+    RUN_TEST(test_clock_ticking_during_poll);
     RUN_TEST(test_body_gap_timeout);
     RUN_TEST(test_watchdog);
     RUN_TEST(test_wifi_drop);

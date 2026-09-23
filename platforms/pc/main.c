@@ -272,8 +272,7 @@ static sock_t sk = NO_SOCK;
 static uint8_t tstate = TINC_TCP_IDLE;
 static struct dns_job *job;
 static uint16_t tport;
-static int connecting, blocked_logged, got_data;
-static unsigned rd_calls, rd_blocked, rd_skipped; /* diagnostics, logged on close */
+static int connecting;
 
 static void set_nonblocking(sock_t s)
 {
@@ -287,9 +286,6 @@ static void set_nonblocking(sock_t s)
 
 void tinc_plat_tcp_close(void)
 {
-    if (sk != NO_SOCK)
-        say("tcp: close (state %u, recv %u, would-block %u, skipped %u)", tstate, rd_calls, rd_blocked, rd_skipped);
-    rd_calls = rd_blocked = rd_skipped = 0;
     if (job) {
         LOCK();
         if (job->done) {
@@ -304,7 +300,7 @@ void tinc_plat_tcp_close(void)
     if (sk != NO_SOCK)
         sock_close(sk);
     sk = NO_SOCK;
-    connecting = blocked_logged = got_data = 0;
+    connecting = 0;
     tstate = TINC_TCP_IDLE;
 }
 
@@ -351,7 +347,6 @@ static void start_connect(struct sockaddr_in *a)
     set_nonblocking(sk);
     if (connect(sk, (struct sockaddr *)a, sizeof *a) == 0) {
         tstate = TINC_TCP_OPEN;
-        say("tcp: connected at once");
     } else if (SOCK_WOULDBLOCK()) {
         connecting = 1;
     } else {
@@ -391,7 +386,8 @@ uint8_t tinc_plat_tcp_state(void)
             getsockopt(sk, SOL_SOCKET, SO_ERROR, (char *)&err, &len);
             connecting = 0;
             tstate = err || FD_ISSET(sk, &e) ? TINC_TCP_ERR_CONNECT : TINC_TCP_OPEN;
-            say(tstate == TINC_TCP_OPEN ? "tcp: connected" : "tcp: connect failed (%d)", err);
+            if (tstate != TINC_TCP_OPEN)
+                say("tcp: connect failed (%d)", err);
         }
     }
     return tstate;
@@ -404,16 +400,11 @@ uint16_t tinc_plat_tcp_write(const uint8_t *p, uint16_t n)
     if (tstate != TINC_TCP_OPEN)
         return 0;
     w = (int)send(sk, (const char *)p, n, SEND_FLAGS);
-    if (w >= 0) {
-        say("tcp: sent %d/%u", w, n);
+    if (w >= 0)
         return (uint16_t)w;
-    }
     if (!SOCK_WOULDBLOCK()) {
         say("tcp: send failed (%d)", SOCK_ERRNO());
         tstate = TINC_TCP_ERR_CONNECT;
-    } else if (!blocked_logged) {
-        say("tcp: send would block (%d)", SOCK_ERRNO());
-        blocked_logged = 1;
     }
     return 0;
 }
@@ -422,22 +413,14 @@ uint16_t tinc_plat_tcp_read(uint8_t *p, uint16_t n)
 {
     int r;
 
-    if (tstate != TINC_TCP_OPEN) {
-        rd_skipped++;
+    if (tstate != TINC_TCP_OPEN)
         return 0;
-    }
-    rd_calls++;
     r = (int)recv(sk, (char *)p, n, 0);
-    if (r > 0) {
-        if (!got_data++)
-            say("tcp: first data (%d bytes)", r);
+    if (r > 0)
         return (uint16_t)r;
-    }
     if (r == 0) {
         tstate = TINC_TCP_CLOSED;
-    } else if (SOCK_WOULDBLOCK()) {
-        rd_blocked++;
-    } else {
+    } else if (!SOCK_WOULDBLOCK()) {
         say("tcp: recv failed (%d)", SOCK_ERRNO());
         tstate = TINC_TCP_ERR_CONNECT;
     }
