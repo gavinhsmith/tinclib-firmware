@@ -7,11 +7,12 @@ protocol defined in `tinclib-protocol` and does all the real networking
 (Wi-Fi, TLS, HTTP) on behalf of the TI-84 Plus CE calculator, which talks to
 it over USB serial through a bridge chip on the dev board.
 
-The repo holds **one chip-independent core plus one platform layer per
-chip**. ESP8266 is the first (and currently only) target; ESP32 is next.
-Everything protocol- or HTTP-shaped belongs in the core so every chip gets
-it for free; a platform layer only adapts one chip's APIs to the core's
-interface.
+The repo holds **one target-independent core plus one platform layer per
+target**. Targets today: the ESP8266, and the PC (`platforms/pc/`), where
+the firmware runs as a desktop app and the calculator plugs straight into
+the PC. ESP32 is next. Everything protocol- or HTTP-shaped belongs in the
+core so every target gets it for free; a platform layer only adapts one
+target's APIs to the core's interface.
 
 Consumes `tinclib-protocol` as a **git submodule** at
 `external/tinclib-protocol`, pinned to a release tag (currently `v0.1.0`),
@@ -24,24 +25,26 @@ here by moving the submodule to the new tag.
 ## Layout
 
 ```
-lib/tinc_core/            chip-independent core, C99, no Arduino/SDK calls
+lib/tinc_core/            target-independent core, C99, no Arduino/SDK/OS calls
   tinc_core.h             core API (tinc_core_init, tinc_link_step, tinc_poll, ...)
-  tinc_platform.h         the interface every chip must implement
+  tinc_platform.h         the interface every target must implement
   link.c                  UART framing, long-poll hold, non-blocking reply drain
   dispatch.c              HELLO gate, SEQ reply cache, message handlers
   req.c                   request state machine + HTTP response parsing
   transcode.c, wifi_rank.c, proto.c
-platforms/<chip>/         one platform layer per chip (platforms/esp8266/ today)
+platforms/esp8266/        ESP8266 platform layer (Arduino core)
+platforms/pc/             PC platform layer (Win32 / POSIX), env `pc`
 external/tinclib-protocol pinned protocol submodule
 test/test_core/           native Unity tests of the core (incl. golden vectors)
-test/fake_platform.h      PC implementation of tinc_platform.h for tests/fuzz
+test/fake_platform.h      in-memory implementation of tinc_platform.h for tests/fuzz
 test/fuzz/                libFuzzer target for the dispatcher
+test/pc/e2e.py            end-to-end test of the PC target over a pty
 ```
 
-Adding a chip: create `platforms/<chip>/` implementing `tinc_platform.h`,
-add `[env:<chip>]` to `platformio.ini` with `build_src_filter = +<<chip>/>`,
-and add the chip to the CI `build` matrix. The core and its tests should not
-need to change; if a chip needs something the interface doesn't offer,
+Adding a target: create `platforms/<target>/` implementing `tinc_platform.h`,
+add `[env:<target>]` to `platformio.ini` with `build_src_filter = +<<target>/>`,
+and add it to the CI `build` matrix. The core and its tests should not
+need to change; if a target needs something the interface doesn't offer,
 extend `tinc_platform.h` and `test/fake_platform.h` together.
 
 ## Target hardware
@@ -50,6 +53,14 @@ extend `tinc_platform.h` and `test/fake_platform.h` together.
   marking seen so far: ESP8266MOD / AI-Thinker style module.
 - **ESP32** — planned, not started. Pick the exact variant/board when the
   port begins; don't assume one here.
+- **PC** (`platforms/pc/`, env `pc`): the firmware as a desktop app for
+  Windows, Linux and macOS. The calculator plugs into the PC, `tinclib` runs
+  in USB device mode (it accepts a PC host for exactly this), and the app
+  opens the serial port that appears. "Wi-Fi" is the PC's own connection and
+  always reports connected; saved slots stay in memory. It must behave like
+  a board on the wire: same core, same errors, same non-blocking rules
+  (DNS runs on a thread because `getaddrinfo` blocks). It is a development
+  and no-hardware stand-in, not a replacement for the ESP targets.
 - Confirm actual flash size per board (`esptool.py flash_id`) rather than
   assuming — don't hardcode a flash-size assumption into partition/LittleFS
   layout without checking.
@@ -74,6 +85,9 @@ extend `tinc_platform.h` and `test/fake_platform.h` together.
   were explicitly avoided by this choice.
 - The `native` PlatformIO environment builds and tests the core on a PC
   (`pio test -e native`). Keep that possible — see Architecture below.
+- The `pc` environment (PlatformIO `native` platform, the host's gcc/clang)
+  builds `platforms/pc/` with plain Win32/POSIX calls, no extra libraries;
+  `platforms/pc/libs.py` adds the per-OS link libraries.
 - Pin platform versions in `platformio.ini` (e.g. `espressif8266@4.2.1`) so
   builds are reproducible.
 - On Windows, run `pio` from PowerShell/cmd: MSYS2's gcc fails silently
@@ -83,8 +97,8 @@ extend `tinc_platform.h` and `test/fake_platform.h` together.
 
 ```
 ┌─────────────────────────────────────────┐
-│ Platform layer, per chip                 │  platforms/<chip>/: Wi-Fi, TCP/TLS,
-│ (C++, Arduino core)                      │  LittleFS, UART, NTP, debug log
+│ Platform layer, per target               │  platforms/<target>/: Wi-Fi, TCP/TLS,
+│ (Arduino core, or the OS on the PC)      │  storage, UART, NTP, debug log
 ├──────────── tinc_platform.h ────────────┤
 │ Core: link, dispatcher, request state    │  lib/tinc_core/: pure C99.
 │ machine, HTTP parsing, transcoding       │  No Arduino calls. Tested on a PC.
