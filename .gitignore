@@ -56,3 +56,6 @@ dkms.conf
 
 # PlatformIO
 .pio/
+
+# Wi-Fi credentials for the serial test script
+tools/serial/wifi.txt

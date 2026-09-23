@@ -1,0 +1,30 @@
+# End-to-end GET over Wi-Fi. Needs a saved slot (run wifi.txt once first).
+#   serial-passthrough -a COM5 -p tools/serial/tinc.spec < tools/serial/fetch.txt
+
+wait 2000                   # opening the port usually resets the board; let it boot
+pkt type=1 seq=1 payload=000100000001
+expect 500 flags=1 type=1 seq=1
+
+# scan + join after boot; STATUS wifi_state 2 = connected
+wait 10000
+pkt type=2 seq=2
+expect 500 flags=1 type=2 seq=2 len=12 payload=[02
+
+# REQ_BEGIN GET http://example.com/ (url_len 0x13, no headers)
+pkt type=0x10 seq=3 payload=0100000000000013000000"http://example.com/"
+expect 500 flags=1 type=16 seq=3 len=0
+
+# REQ_STATUS: state 05 (BODY), err 00, HTTP 200 (C8 00), then content_len and type
+wait 3000
+pkt type=0x11 seq=4
+expect 500 flags=1 type=17 seq=4 *payload=[05 00 C8 00
+
+# BODY_READ: offset 0, up to 200 (C8 00) bytes, long-poll 50 ms (32)
+pkt type=0x21 seq=5 payload=00000000C80032
+expect 500 flags=1 type=33 seq=5 *payload=[00 00 00 00
+
+# REQ_ABORT frees the request
+pkt type=0x14 seq=6
+expect 500 flags=1 type=20 seq=6
+
+quit
