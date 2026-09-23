@@ -7,7 +7,7 @@
  *
  * "Wi-Fi" is the PC's own connection: the PC can't join another network,
  * so it has one Wi-Fi slot, "LAN" (TINC_SLOT_COUNT=1), locked
- * (protocol 0.2's Wi-Fi lock: WIFI_SET/WIFI_FORGET get ERR_LOCKED), and
+ * (the protocol's Wi-Fi lock: WIFI_SET/WIFI_FORGET get ERR_LOCKED), and
  * every request goes out through the PC's networking stack.
  *
  * Every frame is printed to stdout as it passes, one line each:
@@ -96,10 +96,23 @@ static void sleep_ms(unsigned ms)
 
 static int port_lost;
 
-/* The port is gone (calculator unplugged, or its program ended). */
+/* Errors that just mean the port went away: the calculator's program ended
+ * (tinclib shuts USB down) or the cable was pulled. Normal, so not logged. */
+static int port_went_away(unsigned long code)
+{
+#ifdef _WIN32
+    return code == ERROR_BAD_COMMAND || code == ERROR_DEVICE_NOT_CONNECTED ||
+           code == ERROR_OPERATION_ABORTED || code == ERROR_ACCESS_DENIED ||
+           code == ERROR_INVALID_HANDLE || code == ERROR_FILE_NOT_FOUND;
+#else
+    return code == 0 || code == EIO || code == ENXIO || code == ENODEV || code == EBADF;
+#endif
+}
+
+/* Stop using the port; the main loop waits for it to come back. */
 static void lose(const char *what, unsigned long code)
 {
-    if (!port_lost)
+    if (!port_lost && !port_went_away(code))
         say("serial: %s failed (error %lu)", what, code);
     port_lost = 1;
 }
@@ -600,7 +613,7 @@ int main(int argc, char **argv)
         tinc_poll();
         if (port_lost) {
             /* like a board reset: the calculator re-handshakes with HELLO */
-            say("%s: lost; waiting for it to come back", argv[1]);
+            say("%s: calculator disconnected; waiting for it to come back", argv[1]);
             port_close();
             tinc_plat_tcp_close();
             tinc_core_init();
