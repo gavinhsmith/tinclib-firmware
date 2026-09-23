@@ -1,18 +1,18 @@
 # tinclib-firmware
 
 Firmware for the network co-processor that TINCLIB talks to. It speaks
-[tinclib-protocol](https://github.com/gavinhsmith/tinclib-protocol) **v0.2.0**
+[tinclib-protocol](https://github.com/gavinhsmith/tinclib-protocol) **v0.3.0**
 to the TI-84 Plus CE over UART, and handles the Wi-Fi and HTTP work for it.
-Protocol 0.2 covers plain-HTTP GET, three Wi-Fi profiles (hidden networks
-included) and a firmware-side Wi-Fi lock. HTTPS, TLS, NTP and POST arrive with
+Protocol 0.3 covers plain-HTTP GET, Wi-Fi profiles (hidden networks included;
+the firmware decides how many slots it has) and a firmware-side Wi-Fi lock. HTTPS, TLS, NTP and POST arrive with
 later protocol versions.
 
 One shared core runs on every target. Each target adds a thin platform layer.
 
 | Target | Directory | PlatformIO env | Status |
 |---|---|---|---|
-| ESP8266 | `platforms/esp8266/` | `esp8266` | protocol 0.2 |
-| PC (Windows, Linux, macOS) | `platforms/pc/` | `pc` | protocol 0.2, calculator plugged into the PC |
+| ESP8266 | `platforms/esp8266/` | `esp8266` | protocol 0.3, 5 Wi-Fi slots |
+| PC (Windows, Linux, macOS) | `platforms/pc/` | `pc` | protocol 0.3, 1 Wi-Fi slot, calculator plugged into the PC |
 | ESP32 | not started | | planned |
 
 ## Layout
@@ -53,8 +53,8 @@ pio run -e pc                          # -> .pio/build/pc/program(.exe)
 ```
 
 The app waits for the port to appear and reopens it if the calculator is unplugged, which the calculator
-sees like a board reset. The PC can't join another network, so it reports itself as connected, shows all
-three Wi-Fi profiles as "LAN", and keeps them locked (protocol 0.2's Wi-Fi lock): `WIFI_SET` and
+sees like a board reset. The PC can't join another network, so it reports itself as connected, has a
+single Wi-Fi slot named "LAN", and keeps it locked (the protocol's Wi-Fi lock): `WIFI_SET` and
 `WIFI_FORGET` get `ERR_LOCKED`, and every request goes out through the PC's own networking stack.
 Releases attach prebuilt `tinclib-pc-*` binaries for Windows, Linux and macOS.
 
@@ -62,8 +62,8 @@ Every packet is printed to stdout as it passes, one readable line each (`>` from
 reply); log lines (request states and errors) go to stderr:
 
 ```
-     3.102  calc > #2 HELLO v0.2 max_payload=256
-     3.103  calc < #2 HELLO ok v0.2 max_payload=1024 heap=1048576
+     3.102  calc > #2 HELLO v0.3 max_payload=256
+     3.103  calc < #2 HELLO ok v0.3 max_payload=1024 heap=1048576 wifi_slots=1
      3.210  calc > #5 REQ_BEGIN GET http://api.example.com/v1/items?... (headers: 31 bytes, not shown)
      3.498  calc < #7 REQ_STATUS BODY http=200 len=812 type=application/json
      3.520  calc < #8 BODY_READ @0 200 bytes: "{\"items\":[{\"id\":1,\"name\":\"first\"},{\"id\":2,\"n"...
@@ -97,18 +97,18 @@ interface doesn't offer, extend `tinc_platform.h` and the fake together.
 - Wi-Fi lock: build with `-D TINC_WIFI_LOCK=1` (e.g. `build_flags` in `platformio.ini`) to stop the
   calculator changing the saved profiles. There's no physical switch wired up yet.
 - Hidden networks (the `HIDDEN` slot flag) are joined by name after every network the scan did show.
-- Slots saved by 0.1 firmware still load after an upgrade, as non-hidden.
+- 5 Wi-Fi slots (`-D TINC_SLOT_COUNT=5` in `platformio.ini`; the core reports it in `HELLO`).
+- Profiles saved by the older 3-slot firmware (protocol 0.1/0.2) move into slots 0-2 on the first boot
+  after an upgrade.
 - The debug log goes to Serial1 (GPIO2, TX only). The reset reason is logged
   at boot.
 - The ESP8266 SDK doesn't report WPA2-Enterprise in scan results, so those
   networks can't be flagged as unsupported. Joining them simply fails.
 
-## Known protocol gaps (0.2)
+## Known protocol gaps (0.3)
 
 - The `WIFI_SET` comment in `protocol.h` says the ESP joins "the first
-  reachable slot, 0 → 2". This firmware ranks candidates by RSSI instead, as
+  reachable slot, 0 → wifi_slots-1". This firmware ranks candidates by RSSI instead, as
   AGENTS.md requires. The protocol.h comment should be fixed upstream.
-- `WIFI_LIST` can be up to 102 bytes, which is more than a peer that
-  advertised the 64-byte minimum `max_payload` can receive.
 - There is no error code for a storage failure. A failed slot write returns
   `ERR_NO_MEM`.

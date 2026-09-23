@@ -15,7 +15,7 @@ core so every target gets it for free; a platform layer only adapts one
 target's APIs to the core's interface.
 
 Consumes `tinclib-protocol` as a **git submodule** at
-`external/tinclib-protocol`, pinned to a release tag (currently `v0.2.0`),
+`external/tinclib-protocol`, pinned to a release tag (currently `v0.3.0`),
 and compiled in place by `lib/tinc_core/proto.c`. **Never fork or hand-copy
 `protocol.h`/`crc16.c`/`tinc_frame.c` into this repo.** If the shared
 protocol seems to need a change to support something the firmware needs,
@@ -58,8 +58,8 @@ extend `tinc_platform.h` and `test/fake_platform.h` together.
   Windows, Linux and macOS. The calculator plugs into the PC, `tinclib` runs
   in USB device mode (it accepts a PC host for exactly this), and the app
   opens the serial port that appears. "Wi-Fi" is the PC's own connection: it
-  always reports connected on slot 0, all three profiles read "LAN",
-  and the profiles are permanently locked (0.2 Wi-Fi lock), so `WIFI_SET` /
+  always reports connected on slot 0, has exactly one slot ("LAN",
+  `TINC_SLOT_COUNT=1`), and it is permanently locked (Wi-Fi lock), so `WIFI_SET` /
   `WIFI_FORGET` get `ERR_LOCKED`. It must behave like
   a board on the wire: same core, same errors, same non-blocking rules
   (DNS runs on a thread because `getaddrinfo` blocks). It is a development
@@ -193,9 +193,13 @@ insecure-by-default (rejected outright). Rules that follow from this:
 
 Candidate ranking lives in the core (`wifi_rank.c`); each platform layer
 runs the scan/join state machine with its chip's Wi-Fi API.
-- **3 saved profiles max**, SSID + password, write-only passwords (no
-  command may read one back — enforce this in the dispatcher, not just by
-  omission in the API).
+- **The slot count is per target** (protocol 0.3): `TINC_SLOT_COUNT` in
+  each env's `build_flags` — 5 on the ESP boards, 1 on the PC — reported in
+  the `HELLO` reply. Slots are SSID + password + flags, with write-only
+  passwords (no command may read one back — enforce this in the
+  dispatcher, not just by omission in the API). `WIFI_GET` returns one
+  slot per frame. Changing a target's count changes its slot file layout:
+  migrate the old file (see `slots_load` on the ESP8266), don't drop it.
 - **Boot/reconnect: scan, match saved SSIDs, pick the strongest RSSI
   match, try it, fall through to the next match on failure.** This was a
   deliberate choice over priority-by-slot-order — don't revert to
@@ -215,7 +219,7 @@ runs the scan/join state machine with its chip's Wi-Fi API.
   `tinc_wifi_info.locked` — a build flag (`TINC_WIFI_LOCK` on the ESP8266)
   or, later, a physical switch; always on for the PC target. Never settable
   over the wire. The dispatcher enforces it (`ERR_LOCKED` on `WIFI_SET` /
-  `WIFI_FORGET`, `WIFI_LIST` still works) and STATUS reports it.
+  `WIFI_FORGET`, `WIFI_GET` still works) and STATUS reports it.
 - WPA2-Enterprise and captive-portal networks are **out of scope** — detect
   what's detectable in scan results and mark unsupported rather than
   silently failing to connect with no explanation. (The ESP8266 SDK doesn't

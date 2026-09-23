@@ -6,7 +6,7 @@
  *   tinclib-pc PORT        e.g. COM7 or /dev/ttyACM0
  *
  * "Wi-Fi" is the PC's own connection: the PC can't join another network,
- * so all three profiles read "LAN", the profiles are locked
+ * so it has one Wi-Fi slot, "LAN" (TINC_SLOT_COUNT=1), locked
  * (protocol 0.2's Wi-Fi lock: WIFI_SET/WIFI_FORGET get ERR_LOCKED), and
  * every request goes out through the PC's networking stack.
  *
@@ -458,21 +458,21 @@ static void local_ip(uint8_t ip[4])
 
 #define PROFILE_NAME "LAN"
 
-/* All three profiles are the PC's own network. */
+/* The one profile is the PC's own network. */
 static void local_profiles(void)
 {
     tinc_slots *s = tinc_core_slots();
     uint8_t i;
 
     memset(s, 0, sizeof *s);
-    for (i = 0; i < TINC_WIFI_SLOTS; i++)
+    for (i = 0; i < TINC_SLOT_COUNT; i++)
         strcpy(s->ssid[i], PROFILE_NAME);
 }
 
 void tinc_plat_wifi_info(tinc_wifi_info *out)
 {
     out->state = TINC_WIFI_CONNECTED;
-    out->slot = 0; /* "LAN": they're all the same */
+    out->slot = 0; /* "LAN" */
     out->rssi = 0;
     local_ip(out->ip);
     out->locked = 1; /* the calculator can't change which network the PC is on */

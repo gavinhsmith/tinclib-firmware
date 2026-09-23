@@ -113,8 +113,9 @@ def main():
 
         flags, r = link.call(0x02)  # before HELLO
         assert flags == 5 and r[0] == 0x02, "want ERR_NO_HELLO, got %r %r" % (flags, r)
-        flags, r = link.call(0x01, bytes([0, 2, 0, 0, 0, 4]))
-        assert flags == 1 and r[:2] == b"\x00\x02", "HELLO: %r %r" % (flags, r)
+        flags, r = link.call(0x01, bytes([0, 3, 0, 0, 0, 4]))
+        assert flags == 1 and r[:2] == b"\x00\x03", "HELLO: %r %r" % (flags, r)
+        assert len(r) == 11 and r[10] == 1, "HELLO should report 1 Wi-Fi slot: %r" % r
         flags, r = link.call(0x02)
         assert flags == 1 and len(r) == 13, "STATUS: %r" % r
         assert r[0] == 2 and r[1] == 0, "STATUS should say connected, slot 0: %r" % r
@@ -144,17 +145,18 @@ def main():
         assert err == 0x22, "want ERR_CONNECT, got 0x%02X" % err
         print("ok  refused port: ERR_CONNECT")
 
-        # the PC can't join other networks: profiles are locked, all "LAN"
-        local = b"\x03LAN"
-        flags, r = link.call(0x40)
-        assert flags == 1 and r == local * 3 + b"\x00\x00\x00", r
+        # the PC can't join other networks: one slot, "LAN", locked
+        flags, r = link.call(0x40, b"\x00")
+        assert flags == 1 and r == b"\x03LAN\x00", r
+        flags, r = link.call(0x40, b"\x01")
+        assert flags == 5 and r[0] == 0x08, "slot 1 should be ERR_BAD_ARG: %r %r" % (flags, r)
         flags, r = link.call(0x41, b"\x00\x04Home\x0ehunter22secret\x00")
         assert flags == 5 and r[0] == 0x0A, "WIFI_SET should be ERR_LOCKED: %r %r" % (flags, r)
-        flags, r = link.call(0x42, b"\x01")
+        flags, r = link.call(0x42, b"\x00")
         assert flags == 5 and r[0] == 0x0A, "WIFI_FORGET should be ERR_LOCKED: %r %r" % (flags, r)
-        flags, r = link.call(0x40)
-        assert flags == 1 and r == local * 3 + b"\x00\x00\x00", r
-        print("ok  Wi-Fi profiles locked, all LAN")
+        flags, r = link.call(0x40, b"\x00")
+        assert flags == 1 and r == b"\x03LAN\x00", r
+        print("ok  one Wi-Fi slot, LAN, locked")
     finally:
         proc.terminate()
         proc.wait(5)
@@ -163,10 +165,10 @@ def main():
     trace.seek(0)
     log = trace.read()
     print(log[:2000])
-    for want in ("calc > #1 STATUS?", "calc < #1 STATUS -> error NO_HELLO", "HELLO ok v0.2",
+    for want in ("calc > #1 STATUS?", "calc < #1 STATUS -> error NO_HELLO", "HELLO ok v0.3",
                  "REQ_BEGIN GET http://127.0.0.1:", "/data?...", "REQ_STATUS BODY http=200",
                  "BODY_READ @0 max=200 wait=50ms", "bytes EOF", "WIFI_SET -> error LOCKED",
-                 'WIFI_LIST 0="LAN"'):
+                 'WIFI_GET ssid="LAN"', "wifi_slots=1"):
         assert want in log, "trace is missing %r" % want
     for secret in ("s3cret", "hunter22secret"):
         assert secret not in log, "trace leaked %r" % secret

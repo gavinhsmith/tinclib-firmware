@@ -37,26 +37,44 @@ extern "C" uint32_t tinc_plat_free_heap(void) { return ESP.getFreeHeap(); }
 
 /* ---- slot storage ---------------------------------------------------- */
 
+/* Slot files from 0.1/0.2 firmware: 3 slots, ssid[3][33] then pass[3][65],
+ * then (0.2 only) wflags[3]. Their profiles move into the first 3 slots. */
+#define OLD_SLOTS 3
+#define OLD_V01_SIZE (OLD_SLOTS * (TINC_SSID_MAX + 1 + TINC_PASS_MAX + 1))
+#define OLD_V02_SIZE (OLD_V01_SIZE + OLD_SLOTS)
+
 static void slots_load(void)
 {
     File f = LittleFS.open(SLOTS_FILE, "r");
+    static uint8_t raw[sizeof(tinc_slots) > OLD_V02_SIZE ? sizeof(tinc_slots) : OLD_V02_SIZE];
     tinc_slots tmp;
     size_t n;
+    uint8_t i;
 
     if (!f)
         return;
-    memset(&tmp, 0, sizeof tmp);
-    n = f.read((uint8_t *)&tmp, sizeof tmp);
-    /* a 0.1 file stops before wflags; those slots just aren't hidden */
-    if (n == sizeof tmp || n == offsetof(tinc_slots, wflags)) {
-        uint8_t i;
-        for (i = 0; i < TINC_WIFI_SLOTS; i++) { /* never trust flash for NULs */
-            tmp.ssid[i][TINC_SSID_MAX] = 0;
-            tmp.pass[i][TINC_PASS_MAX] = 0;
-        }
-        *tinc_core_slots() = tmp;
-    }
+    n = f.read(raw, sizeof raw);
     f.close();
+    memset(&tmp, 0, sizeof tmp);
+    if (n == sizeof tmp) {
+        memcpy(&tmp, raw, sizeof tmp);
+    } else if (n == OLD_V01_SIZE || n == OLD_V02_SIZE) {
+        for (i = 0; i < OLD_SLOTS && i < TINC_SLOT_COUNT; i++) {
+            memcpy(tmp.ssid[i], raw + i * (TINC_SSID_MAX + 1), TINC_SSID_MAX + 1);
+            memcpy(tmp.pass[i], raw + OLD_SLOTS * (TINC_SSID_MAX + 1) + i * (TINC_PASS_MAX + 1),
+                   TINC_PASS_MAX + 1);
+            tmp.wflags[i] = n == OLD_V02_SIZE ? raw[OLD_V01_SIZE + i] : 0;
+        }
+        Serial1.println("slots: migrated a 3-slot file");
+    } else {
+        Serial1.printf("slots: ignoring %u-byte file\n", (unsigned)n);
+        return;
+    }
+    for (i = 0; i < TINC_SLOT_COUNT; i++) { /* never trust flash for NULs */
+        tmp.ssid[i][TINC_SSID_MAX] = 0;
+        tmp.pass[i][TINC_PASS_MAX] = 0;
+    }
+    *tinc_core_slots() = tmp;
 }
 
 /* Write-then-rename so a brownout mid-write can't lose the old slots. */
@@ -87,7 +105,11 @@ static uint32_t ws_at;
 static bool have_slots(void)
 {
     const tinc_slots *s = tinc_core_slots();
-    return s->ssid[0][0] || s->ssid[1][0] || s->ssid[2][0];
+    uint8_t i;
+    for (i = 0; i < TINC_SLOT_COUNT; i++)
+        if (s->ssid[i][0])
+            return true;
+    return false;
 }
 
 /* Saved slots a scan should be able to see (not hidden). */
@@ -95,7 +117,7 @@ static bool visible_slots(void)
 {
     const tinc_slots *s = tinc_core_slots();
     uint8_t i;
-    for (i = 0; i < TINC_WIFI_SLOTS; i++)
+    for (i = 0; i < TINC_SLOT_COUNT; i++)
         if (s->ssid[i][0] && !(s->wflags[i] & TINC_WF_HIDDEN))
             return true;
     return false;
@@ -161,10 +183,10 @@ static void wifi_step(void)
             uint8_t k;
             strncpy(e->ssid, WiFi.SSID(i).c_str(), TINC_SSID_MAX);
             e->ssid[TINC_SSID_MAX] = 0;
-            for (k = 0; k < TINC_WIFI_SLOTS; k++)
+            for (k = 0; k < TINC_SLOT_COUNT; k++)
                 if (s->ssid[k][0] && !strcmp(s->ssid[k], e->ssid))
                     break;
-            if (k == TINC_WIFI_SLOTS)
+            if (k == TINC_SLOT_COUNT)
                 continue;
             memcpy(e->bssid, WiFi.BSSID(i), 6);
             e->rssi = (int8_t)WiFi.RSSI(i);

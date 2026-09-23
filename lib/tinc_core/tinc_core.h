@@ -14,10 +14,19 @@
 extern "C" {
 #endif
 
+/* Wi-Fi slots this firmware has (protocol 0.3: reported in HELLO). Set per
+ * target in platformio.ini: 5 on the ESP boards, 1 on the PC. */
+#ifndef TINC_SLOT_COUNT
+#define TINC_SLOT_COUNT 5
+#endif
+#if TINC_SLOT_COUNT < 1 || TINC_SLOT_COUNT > TINC_WIFI_SLOTS_MAX
+#error "TINC_SLOT_COUNT must be 1..TINC_WIFI_SLOTS_MAX"
+#endif
+
 struct tinc_slots {
-    char ssid[TINC_WIFI_SLOTS][TINC_SSID_MAX + 1]; /* "" = empty slot */
-    char pass[TINC_WIFI_SLOTS][TINC_PASS_MAX + 1]; /* write-only on the wire */
-    uint8_t wflags[TINC_WIFI_SLOTS];               /* TINC_WF_*; last, so 0.1 slot files still load */
+    char ssid[TINC_SLOT_COUNT][TINC_SSID_MAX + 1]; /* "" = empty slot */
+    char pass[TINC_SLOT_COUNT][TINC_PASS_MAX + 1]; /* write-only on the wire */
+    uint8_t wflags[TINC_SLOT_COUNT];               /* TINC_WF_* */
 };
 
 /* ---- entry points for a platform's main loop ---- */
@@ -103,7 +112,7 @@ typedef struct {
 } tinc_cand;
 
 #define TINC_CAND_DIRECT 0xFFu /* hidden slot not seen in the scan: join by SSID alone */
-#define TINC_CAND_CAP (TINC_CAND_MAX + TINC_WIFI_SLOTS) /* size of the out array */
+#define TINC_CAND_CAP (TINC_CAND_MAX + TINC_SLOT_COUNT) /* size of the out array */
 
 /* Saved-SSID matches above the RSSI floor, strongest BSSID first; then any
  * hidden slot the scan didn't show, to be tried directly. out holds

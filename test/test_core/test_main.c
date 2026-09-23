@@ -226,16 +226,20 @@ static void test_golden_errors(void)
 
 static void test_golden_wifi(void)
 {
-    uint8_t home[] = {0, 7, 'H', 'o', 'm', 'e', 'N', 'e', 't', 0, 0};
-    uint8_t phone[] = {2, 5, 'P', 'h', 'o', 'n', 'e', 8, 'h', 'u', 'n', 't', 'e', 'r', '2', '2', TINC_WF_HIDDEN};
+    uint8_t phone[] = {4, 5, 'P', 'h', 'o', 'n', 'e', 8, 'h', 'u', 'n', 't', 'e', 'r', '2', '2', TINC_WF_HIDDEN};
+    uint8_t empty_slot = 3, past_end = TINC_SLOT_COUNT;
 
     hello();
-    send(TINC_T_WIFI_SET, home, sizeof home);
-    expect_ok();
     send(TINC_T_WIFI_SET, phone, sizeof phone);
     expect_ok();
-    send_vec(tv_wifi_list_req, sizeof tv_wifi_list_req);
-    expect_vec(tv_wifi_list_resp, sizeof tv_wifi_list_resp);
+    send_vec(tv_wifi_get_req, sizeof tv_wifi_get_req);
+    expect_vec(tv_wifi_get_resp, sizeof tv_wifi_get_resp);
+    hello(); /* clears the reply cache: the next two vectors reuse seq 9 */
+    send_final(TINC_T_WIFI_GET, 9, &empty_slot, 1, 1);
+    expect_vec(tv_wifi_get_resp_empty, sizeof tv_wifi_get_resp_empty);
+    hello();
+    send_final(TINC_T_WIFI_GET, 9, &past_end, 1, 1);
+    expect_vec(tv_err_bad_slot, sizeof tv_err_bad_slot);
 
     send_vec(tv_wifi_set_req, sizeof tv_wifi_set_req);
     expect_vec(tv_wifi_set_resp, sizeof tv_wifi_set_resp);
@@ -272,9 +276,11 @@ static void test_golden_wifi_lock(void)
     TEST_ASSERT_EQUAL(0, fk_saves);
     TEST_ASSERT_EQUAL(0, fk_reconnects);
 
-    send(TINC_T_WIFI_LIST, NULL, 0);
+    slot = 0;
+    send(TINC_T_WIFI_GET, &slot, 1);
     expect_ok();
-    TEST_ASSERT_EQUAL_HEX8_ARRAY("\x04Kept\x00\x00\x00\x00\x00", RPL, 10);
+    TEST_ASSERT_EQUAL(6, RPL_LEN);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY("\x04Kept\x00", RPL, 6);
 }
 
 /* ---- dispatcher ---- */
@@ -699,7 +705,8 @@ static void test_connect_refused(void)
 
 static void test_wifi_set_validation(void)
 {
-    uint8_t bad_slot[] = {3, 1, 'a', 0};
+    uint8_t bad_slot[] = {TINC_SLOT_COUNT, 1, 'a', 0};
+    uint8_t forget_bad = TINC_SLOT_COUNT;
     uint8_t short_pw[] = {0, 1, 'a', 3, 'x', 'y', 'z'};
     uint8_t ok_open[] = {0, 1, 'a', 0};
     uint8_t forget_other = 2;
@@ -707,6 +714,10 @@ static void test_wifi_set_validation(void)
     hello();
     send(TINC_T_WIFI_SET, bad_slot, sizeof bad_slot);
     expect_err(TINC_ERR_BAD_ARG);
+    send(TINC_T_WIFI_FORGET, &forget_bad, 1);
+    expect_err(TINC_ERR_BAD_ARG);
+    send(TINC_T_WIFI_GET, NULL, 0);
+    expect_err(TINC_ERR_BAD_LEN);
     send(TINC_T_WIFI_SET, short_pw, sizeof short_pw);
     expect_err(TINC_ERR_BAD_ARG);
     TEST_ASSERT_EQUAL(0, fk_saves);
@@ -738,19 +749,22 @@ static void test_wifi_set_wflags(void)
     send(TINC_T_WIFI_SET, odd_flags, sizeof odd_flags);
     expect_ok();
     TEST_ASSERT_EQUAL(TINC_WF_HIDDEN, tinc_core_slots()->wflags[1]);
-    send(TINC_T_WIFI_LIST, NULL, 0);
-    TEST_ASSERT_EQUAL_HEX8_ARRAY("\x01" "a" "\x01" "b" "\x00" "\x00\x01\x00", RPL, 8);
+    send(TINC_T_WIFI_GET, no_flags, 1); /* slot 0 */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY("\x01" "a" "\x00", RPL, 3);
+    send(TINC_T_WIFI_GET, odd_flags, 1); /* slot 1 */
+    TEST_ASSERT_EQUAL_HEX8_ARRAY("\x01" "b" "\x01", RPL, 3);
 }
 
-static void test_wifi_list_hides_passwords(void)
+static void test_wifi_get_hides_passwords(void)
 {
     uint8_t set[] = {0, 2, 'n', 'w', 9, 'p', 'a', 's', 's', 'w', 'o', 'r', 'd', '!'};
+    uint8_t slot = 0;
 
     hello();
     send(TINC_T_WIFI_SET, set, sizeof set);
-    send(TINC_T_WIFI_LIST, NULL, 0);
+    send(TINC_T_WIFI_GET, &slot, 1);
     expect_ok();
-    TEST_ASSERT_EQUAL(8, RPL_LEN); /* 2+"nw", 0, 0, then 3 wflags */
+    TEST_ASSERT_EQUAL(4, RPL_LEN); /* 2, "nw", wflags */
     TEST_ASSERT_NULL(memchr(RPL, 'p', RPL_LEN));
 }
 
@@ -1014,8 +1028,8 @@ static void test_describe_golden(void)
 {
     int i;
 
-    TEST_ASSERT_EQUAL_STRING("#1 HELLO v0.2 max_payload=256", describe(tv_hello_req, sizeof tv_hello_req));
-    TEST_ASSERT_EQUAL_STRING("#1 HELLO ok v0.2 max_payload=1024 heap=28000",
+    TEST_ASSERT_EQUAL_STRING("#1 HELLO v0.3 max_payload=256", describe(tv_hello_req, sizeof tv_hello_req));
+    TEST_ASSERT_EQUAL_STRING("#1 HELLO ok v0.3 max_payload=1024 heap=28000 wifi_slots=5",
                              describe(tv_hello_resp, sizeof tv_hello_resp));
     TEST_ASSERT_EQUAL_STRING("#2 STATUS wifi=CONNECTED slot=0 rssi=-61 ip=192.168.1.42 heap=27500 req=IDLE wifi-locked",
                              describe(tv_status_resp_locked, sizeof tv_status_resp_locked));
@@ -1026,12 +1040,14 @@ static void test_describe_golden(void)
     TEST_ASSERT_EQUAL_STRING("#5 BODY_READ @0 max=128 wait=50ms", describe(tv_body_read_req, sizeof tv_body_read_req));
     TEST_ASSERT_EQUAL_STRING("#6 BODY_READ @11 6 bytes EOF: \"\\\"n\\\":1}\"",
                              describe(tv_body_read_resp_eof, sizeof tv_body_read_resp_eof));
-    TEST_ASSERT_EQUAL_STRING("#9 WIFI_LIST 0=\"HomeNet\" 1=\"\" 2=\"Phone\" (2 hidden)",
-                             describe(tv_wifi_list_resp, sizeof tv_wifi_list_resp));
+    TEST_ASSERT_EQUAL_STRING("#9 WIFI_GET slot 4", describe(tv_wifi_get_req, sizeof tv_wifi_get_req));
+    TEST_ASSERT_EQUAL_STRING("#9 WIFI_GET ssid=\"Phone\" hidden", describe(tv_wifi_get_resp, sizeof tv_wifi_get_resp));
+    TEST_ASSERT_EQUAL_STRING("#9 WIFI_GET ssid=\"\"", describe(tv_wifi_get_resp_empty, sizeof tv_wifi_get_resp_empty));
+    TEST_ASSERT_EQUAL_STRING("#9 WIFI_GET -> error BAD_ARG", describe(tv_err_bad_slot, sizeof tv_err_bad_slot));
     TEST_ASSERT_EQUAL_STRING("#10 WIFI_SET slot 1 ssid=\"Phone\" (password not shown) hidden",
                              describe(tv_wifi_set_req, sizeof tv_wifi_set_req));
     TEST_ASSERT_EQUAL_STRING("#12 STATUS -> error NO_HELLO", describe(tv_err_no_hello, sizeof tv_err_no_hello));
-    TEST_ASSERT_EQUAL_STRING("#13 HELLO -> error VERSION (ESP is v0.3)", describe(tv_err_version, sizeof tv_err_version));
+    TEST_ASSERT_EQUAL_STRING("#13 HELLO -> error VERSION (ESP is v0.4)", describe(tv_err_version, sizeof tv_err_version));
     TEST_ASSERT_EQUAL_STRING("#16 WIFI_SET -> error LOCKED", describe(tv_err_locked, sizeof tv_err_locked));
     TEST_ASSERT_EQUAL_STRING("#14 type 0x13 -> error UNSUPPORTED",
                              describe(tv_err_unsupported, sizeof tv_err_unsupported));
@@ -1127,7 +1143,7 @@ int main(void)
     RUN_TEST(test_low_heap);
     RUN_TEST(test_connect_refused);
     RUN_TEST(test_wifi_set_validation);
-    RUN_TEST(test_wifi_list_hides_passwords);
+    RUN_TEST(test_wifi_get_hides_passwords);
     RUN_TEST(test_transcode);
     RUN_TEST(test_transcode_skips_binary);
     RUN_TEST(test_transcode_unit);

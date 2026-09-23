@@ -60,7 +60,7 @@ static const char *type_name(uint8_t t)
     case TINC_T_REQ_STATUS:  return "REQ_STATUS";
     case TINC_T_REQ_ABORT:   return "REQ_ABORT";
     case TINC_T_BODY_READ:   return "BODY_READ";
-    case TINC_T_WIFI_LIST:   return "WIFI_LIST";
+    case TINC_T_WIFI_GET:    return "WIFI_GET";
     case TINC_T_WIFI_SET:    return "WIFI_SET";
     case TINC_T_WIFI_FORGET: return "WIFI_FORGET";
     }
@@ -106,7 +106,8 @@ static void hello(struct out *o, int resp, const uint8_t *p, uint16_t n)
     put(o, "%s v%u.%u max_payload=%u", resp ? " ok" : "", p[TINC_HELLO_MAJOR], p[TINC_HELLO_MINOR],
         tinc_get_u16(p + TINC_HELLO_MAX_PAYLOAD));
     if (resp && n >= TINC_HELLO_RESP_LEN)
-        put(o, " heap=%lu", (unsigned long)tinc_get_u32(p + TINC_HELLO_FREE_HEAP));
+        put(o, " heap=%lu wifi_slots=%u", (unsigned long)tinc_get_u32(p + TINC_HELLO_FREE_HEAP),
+            p[TINC_HELLO_WIFI_SLOTS]);
 }
 
 static void status(struct out *o, const uint8_t *p, uint16_t n)
@@ -197,24 +198,22 @@ static void body(struct out *o, int resp, const uint8_t *p, uint16_t n)
     }
 }
 
-static void wifi_list(struct out *o, const uint8_t *p, uint16_t n)
+static void wifi_get(struct out *o, int resp, const uint8_t *p, uint16_t n)
 {
-    uint16_t off = 0;
-    uint8_t i, l;
+    uint8_t l;
 
-    for (i = 0; i < TINC_WIFI_SLOTS; i++) {
-        if (off >= n)
-            return;
-        l = p[off++];
-        if (off + l > n)
-            return;
-        put(o, " %u=", i);
-        put_text(o, p + off, l);
-        off = (uint16_t)(off + l);
+    if (!resp) {
+        if (n)
+            put(o, " slot %u", p[TINC_WGET_SLOT]);
+        return;
     }
-    for (i = 0; i < TINC_WIFI_SLOTS && off + i < n; i++)
-        if (p[off + i] & TINC_WF_HIDDEN)
-            put(o, " (%u hidden)", i);
+    if (n < 1 || TINC_WGET_SSID + p[TINC_WGET_SSID_LEN] > n)
+        return;
+    l = p[TINC_WGET_SSID_LEN];
+    put(o, " ssid=");
+    put_text(o, p + TINC_WGET_SSID, l);
+    if (TINC_WGET_SSID + l < n && (p[TINC_WGET_SSID + l] & TINC_WF_HIDDEN))
+        put(o, " hidden");
 }
 
 static void wifi_set(struct out *o, const uint8_t *p, uint16_t n)
@@ -302,11 +301,8 @@ void tinc_describe(const uint8_t *f, uint16_t len, char *buf, size_t cap)
     case TINC_T_BODY_READ:
         body(&o, resp, p, n);
         return;
-    case TINC_T_WIFI_LIST:
-        if (resp)
-            wifi_list(&o, p, n);
-        else
-            put(&o, "?");
+    case TINC_T_WIFI_GET:
+        wifi_get(&o, resp, p, n);
         return;
     case TINC_T_WIFI_SET:
         if (resp)
