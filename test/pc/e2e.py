@@ -116,7 +116,7 @@ def main():
         assert flags == 1 and r[0] == 2, "STATUS should say connected: %r" % r
 
         err, status, body = get(link, base + "/data")
-        assert (err, status, body) == (0, 200, BODY), (err, status, len(body or b""))
+        assert (err, status, body) == (0, 200, BODY), "err=0x%02X status=%r len=%d" % (err, status, len(body or b""))
         print("ok  GET /data: %d bytes" % len(body))
 
         err, status, body = get(link, base + "/moved")
@@ -124,7 +124,7 @@ def main():
         print("ok  GET /moved follows the 302")
 
         err, status, body = get(link, base + "/nope")
-        assert status == 404, status
+        assert (err, status) == (0, 404), "404: err=0x%02X status=%r" % (err, status)
         print("ok  GET /nope: 404")
 
         err, _, _ = get(link, "http://no-such-host.invalid/")
