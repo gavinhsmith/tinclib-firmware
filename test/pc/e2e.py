@@ -78,9 +78,9 @@ def get(link, url):
     end = time.time() + 10
     while time.time() < end:
         _, st = link.call(0x11)
-        state, err, http = st[0], st[1], struct.unpack_from("<H", st, 2)[0]
+        state, err, status = st[0], st[1], struct.unpack_from("<H", st, 2)[0]
         if state == 7:
-            return err, http, None
+            return err, status, None
         if state in (5, 6):
             break
         time.sleep(0.05)
@@ -91,7 +91,7 @@ def get(link, url):
         body += r[5:]
         off += len(r) - 5
         if r[4] & 1:
-            return err, http, body
+            return err, status, body
     raise AssertionError("body never finished")
 
 
@@ -115,16 +115,16 @@ def main():
         flags, r = link.call(0x02)
         assert flags == 1 and r[0] == 2, "STATUS should say connected: %r" % r
 
-        err, http, body = get(link, base + "/data")
-        assert (err, http, body) == (0, 200, BODY), (err, http, len(body or b""))
+        err, status, body = get(link, base + "/data")
+        assert (err, status, body) == (0, 200, BODY), (err, status, len(body or b""))
         print("ok  GET /data: %d bytes" % len(body))
 
-        err, http, body = get(link, base + "/moved")
-        assert (err, http, body) == (0, 200, BODY), "redirect: %r" % ((err, http),)
+        err, status, body = get(link, base + "/moved")
+        assert (err, status, body) == (0, 200, BODY), "redirect: %r" % ((err, status),)
         print("ok  GET /moved follows the 302")
 
-        err, http, body = get(link, base + "/nope")
-        assert http == 404, http
+        err, status, body = get(link, base + "/nope")
+        assert status == 404, status
         print("ok  GET /nope: 404")
 
         err, _, _ = get(link, "http://no-such-host.invalid/")
