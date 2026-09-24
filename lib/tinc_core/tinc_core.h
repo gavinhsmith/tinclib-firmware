@@ -29,6 +29,15 @@ struct tinc_slots {
     uint8_t wflags[TINC_SLOT_COUNT];               /* TINC_WF_* */
 };
 
+/* INFO reply, display only. The version follows the release tag; the board
+ * name is set per env in platformio.ini. Each at most TINC_INFO_STR_MAX. */
+#ifndef TINC_FW_VERSION
+#define TINC_FW_VERSION "0.6.0"
+#endif
+#ifndef TINC_BOARD_NAME
+#define TINC_BOARD_NAME "unknown"
+#endif
+
 /* ---- entry points for a platform's main loop ---- */
 
 /* The platform fills tinc_core_slots() from flash after init. */
@@ -65,9 +74,19 @@ uint16_t tinc_dispatch(uint8_t type, uint8_t seq, const uint8_t *pl,
 
 /* ---- request (used by the dispatcher; exposed for tests) ---- */
 
-uint8_t tinc_req_begin(uint8_t flags, uint8_t timeout_s,
+uint8_t tinc_req_begin(uint8_t method, uint8_t flags, uint8_t timeout_s, uint32_t content_len,
                        const char *url, uint16_t url_len,
                        const char *hdrs, uint16_t hdr_len);
+/* Request body, in SENDING: takes what fits in the send buffer right now.
+ * Moves to WAIT_HEADERS once content_len bytes are taken. */
+uint16_t tinc_req_write(const uint8_t *p, uint16_t n);
+uint32_t tinc_req_body_len(void);
+uint32_t tinc_req_body_sent(void);
+int tinc_req_responded(void); /* the server answered before the upload finished */
+/* The index-th response header called name (any case). 1 if found. */
+int tinc_req_header(const char *name, uint8_t name_len, uint8_t index,
+                    const char **val, uint16_t *val_len);
+int tinc_req_hdr_trunc(void); /* some headers didn't fit and were dropped */
 void tinc_req_release(void);
 void tinc_req_poll(void);
 uint8_t tinc_req_state(void);

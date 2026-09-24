@@ -41,6 +41,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def do_POST(self):
+        # echo the upload back, and say where it "went"
+        data = self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(201)
+        self.send_header("Location", "/items/%d" % len(data))
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(BODY)))
+        self.end_headers()
+
     def log_message(self, fmt, *args):
         print("server: " + fmt % args, flush=True)
 
@@ -76,12 +91,18 @@ class Link:
         raise AssertionError("no reply to type 0x%02X" % typ)
 
 
-def get(link, url):
-    """REQ_BEGIN + poll + BODY_READ loop. Returns (err, http_status, body)."""
+def get(link, url, method=1, upload=b""):
+    """REQ_BEGIN [+ BODY_WRITE loop] + poll + BODY_READ loop.
+    Returns (err, http_status, body)."""
     u = url.encode()
-    flags, _ = link.call(0x10, struct.pack("<BBBIHH", 1, 0, 5, 0, len(u), 0) + u)
+    flags, _ = link.call(0x10, struct.pack("<BBBIHH", method, 0, 5, len(upload), len(u), 0) + u)
     assert flags == 1, "REQ_BEGIN failed: %r" % flags
     end = time.time() + 10
+    off = 0
+    while off < len(upload) and time.time() < end:  # also the connect poll
+        flags, r = link.call(0x20, struct.pack("<IB", off, 50) + upload[off:off + 200])
+        assert flags == 1, "BODY_WRITE error %r" % r
+        off = struct.unpack_from("<I", r)[0]
     while time.time() < end:
         _, st = link.call(0x11)
         state, err, status = st[0], st[1], struct.unpack_from("<H", st, 2)[0]
@@ -138,8 +159,8 @@ def main():
 
         flags, r = link.call(0x02)  # before HELLO
         assert flags == 5 and r[0] == 0x02, "want ERR_NO_HELLO, got %r %r" % (flags, r)
-        flags, r = link.call(0x01, bytes([0, 4, 0, 0, 0, 4]))
-        assert flags == 1 and r[:2] == b"\x00\x04", "HELLO: %r %r" % (flags, r)
+        flags, r = link.call(0x01, bytes([0, 6, 0, 0, 0, 4]))
+        assert flags == 1 and r[:2] == b"\x00\x06", "HELLO: %r %r" % (flags, r)
         assert len(r) == 11 and r[10] == 1, "HELLO should report 1 Wi-Fi slot: %r" % r
         flags, r = link.call(0x02)
         assert flags == 1 and len(r) == 13, "STATUS: %r" % r
@@ -162,6 +183,21 @@ def main():
         err, status, body = get(link, base + "/nope")
         assert (err, status) == (0, 404), "404: err=0x%02X status=%r" % (err, status)
         print("ok  GET /nope: 404")
+
+        upload = bytes(range(256)) * 3  # binary, and several BODY_WRITEs
+        err, status, body = get(link, base + "/items", method=2, upload=upload)
+        assert (err, status, body) == (0, 201, upload), "POST: err=0x%02X status=%r" % (err, status)
+        flags, r = link.call(0x13, struct.pack("<BHB", 0, 0, 8) + b"Location")
+        assert flags == 1 and r[0] == 1 and r[3:] == b"/items/768", "HDR_GET: %r %r" % (flags, r)
+        print("ok  POST %d bytes, Location via HDR_GET" % len(upload))
+
+        err, status, body = get(link, base + "/data", method=6)
+        assert (err, status, body) == (0, 200, b""), "HEAD: err=0x%02X status=%r" % (err, status)
+        print("ok  HEAD: no body")
+
+        flags, r = link.call(0x03)
+        assert flags == 1 and r[1:1 + r[0]] == b"0.6.0" and r[2 + r[0]:] == b"PC", "INFO: %r" % r
+        print("ok  INFO")
 
         err, _, _ = get(link, "http://no-such-host.invalid/")
         assert err == 0x21, "want ERR_DNS, got 0x%02X" % err
@@ -192,10 +228,12 @@ def main():
     trace.seek(0)
     log = trace.read()
     print(log[:2000])
-    for want in ("calc > #1 STATUS?", "calc < #1 STATUS -> error NO_HELLO", "HELLO ok v0.4",
+    for want in ("calc > #1 STATUS?", "calc < #1 STATUS -> error NO_HELLO", "HELLO ok v0.6",
                  "REQ_BEGIN GET http://127.0.0.1:", "/data?...", "REQ_STATUS BODY http=200",
                  "BODY_READ @0 max=200 wait=50ms", "bytes EOF", "WIFI_SET -> error LOCKED",
-                 'WIFI_GET ssid="LAN"', "wifi_slots=1"):
+                 'WIFI_GET ssid="LAN"', "wifi_slots=1", "REQ_BEGIN POST http://127.0.0.1:",
+                 "BODY_WRITE @0 200 bytes", "BODY_WRITE next=",
+                 "HDR_GET Location", "found, 10 of 10 bytes (not shown)", 'INFO fw="0.6.0" board="PC"'):
         assert want in log, "trace is missing %r" % want
     for secret in ("s3cret", "hunter22secret"):
         assert secret not in log, "trace leaked %r" % secret

@@ -1,7 +1,8 @@
 /*
  * One-line, human-readable description of a TINCLIB frame, for traces.
- * Never shows request header text, Wi-Fi passwords or URL query strings
- * (they can carry API keys); lengths are shown instead.
+ * Never shows request header text, request bodies, response header values,
+ * Wi-Fi passwords or URL query strings (any of them can carry a key or a
+ * session); lengths are shown instead.
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -56,9 +57,12 @@ static const char *type_name(uint8_t t)
     switch (t) {
     case TINC_T_HELLO:       return "HELLO";
     case TINC_T_STATUS:      return "STATUS";
+    case TINC_T_INFO:        return "INFO";
     case TINC_T_REQ_BEGIN:   return "REQ_BEGIN";
     case TINC_T_REQ_STATUS:  return "REQ_STATUS";
+    case TINC_T_HDR_GET:     return "HDR_GET";
     case TINC_T_REQ_ABORT:   return "REQ_ABORT";
+    case TINC_T_BODY_WRITE:  return "BODY_WRITE";
     case TINC_T_BODY_READ:   return "BODY_READ";
     case TINC_T_WIFI_GET:    return "WIFI_GET";
     case TINC_T_WIFI_SET:    return "WIFI_SET";
@@ -119,6 +123,7 @@ static void err_detail(struct out *o, uint8_t e, uint8_t d)
         put(o, " (%s)", tlsr_name(d));
 }
 
+static const char *const methods[] = {"?", "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"};
 static const char *const req_states[] = {
     "IDLE", "CONNECTING", "TLS", "SENDING", "WAIT_HEADERS", "BODY", "DONE", "ERROR"
 };
@@ -169,7 +174,7 @@ static void req_begin(struct out *o, const uint8_t *p, uint16_t n)
     /* show the URL up to its query string; a query often carries a key */
     for (shown = 0; shown < ul && p[TINC_BEGIN_URL + shown] != '?'; shown++)
         ;
-    put(o, " %s ", p[TINC_BEGIN_METHOD] == TINC_METHOD_GET ? "GET" : "method?");
+    put(o, " %s ", NAME(methods, p[TINC_BEGIN_METHOD]));
     put(o, "%.*s%s", (int)shown, (const char *)p + TINC_BEGIN_URL, shown < ul ? "?..." : "");
     if (p[TINC_BEGIN_FLAGS] & TINC_REQF_TRANSCODE)
         put(o, " transcode");
@@ -227,6 +232,63 @@ static void body(struct out *o, int resp, const uint8_t *p, uint16_t n)
         if (dl > PREVIEW)
             put(o, "...");
     }
+}
+
+/* Length-prefixed string at p[*i], if it fits. */
+static void put_lp(struct out *o, const char *label, const uint8_t *p, uint16_t n, uint16_t *i)
+{
+    if (*i >= n || *i + 1u + p[*i] > n)
+        return;
+    put(o, " %s=", label);
+    put_text(o, p + *i + 1, p[*i]);
+    *i = (uint16_t)(*i + 1 + p[*i]);
+}
+
+static void info(struct out *o, const uint8_t *p, uint16_t n)
+{
+    uint16_t i = 0;
+
+    put_lp(o, "fw", p, n, &i);
+    put_lp(o, "board", p, n, &i);
+}
+
+/* The body itself is never shown: it may be a login form. */
+static void body_write(struct out *o, int resp, const uint8_t *p, uint16_t n)
+{
+    if (!resp) {
+        if (n >= TINC_WRITE_DATA)
+            put(o, " @%lu %u bytes wait=%ums", (unsigned long)tinc_get_u32(p + TINC_WRITE_OFFSET),
+                n - TINC_WRITE_DATA, p[TINC_WRITE_WAIT_MS]);
+        return;
+    }
+    if (n < TINC_WRITE_RESP_LEN)
+        return;
+    put(o, " next=%lu", (unsigned long)tinc_get_u32(p + TINC_WRITE_NEXT_OFFSET));
+    if (p[TINC_WRITE_FLAGS] & TINC_WRITEF_RESPONDED)
+        put(o, " responded");
+}
+
+/* The header name, never its value: it may be a session cookie. */
+static void hdr_get(struct out *o, int resp, const uint8_t *p, uint16_t n)
+{
+    if (!resp) {
+        if (n >= TINC_HGET_NAME && TINC_HGET_NAME + p[TINC_HGET_NAME_LEN] <= n) {
+            put(o, " %.*s", (int)p[TINC_HGET_NAME_LEN], (const char *)p + TINC_HGET_NAME);
+            if (p[TINC_HGET_INDEX])
+                put(o, " #%u", p[TINC_HGET_INDEX]);
+            if (tinc_get_u16(p + TINC_HGET_OFFSET))
+                put(o, " @%u", tinc_get_u16(p + TINC_HGET_OFFSET));
+        }
+        return;
+    }
+    if (n < TINC_HGET_DATA)
+        return;
+    if (p[TINC_HGET_FLAGS] & TINC_HGETF_FOUND)
+        put(o, " found, %u of %u bytes (not shown)", n - TINC_HGET_DATA, tinc_get_u16(p + TINC_HGET_TOTAL_LEN));
+    else
+        put(o, " not found");
+    if (p[TINC_HGET_FLAGS] & TINC_HGETF_TRUNC)
+        put(o, ", headers truncated");
 }
 
 static void wifi_get(struct out *o, int resp, const uint8_t *p, uint16_t n)
@@ -318,6 +380,18 @@ void tinc_describe(const uint8_t *f, uint16_t len, char *buf, size_t cap)
             status(&o, p, n);
         else
             put(&o, "?");
+        return;
+    case TINC_T_INFO:
+        if (resp)
+            info(&o, p, n);
+        else
+            put(&o, "?");
+        return;
+    case TINC_T_BODY_WRITE:
+        body_write(&o, resp, p, n);
+        return;
+    case TINC_T_HDR_GET:
+        hdr_get(&o, resp, p, n);
         return;
     case TINC_T_REQ_BEGIN:
         if (resp)

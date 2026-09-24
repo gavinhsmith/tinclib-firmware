@@ -1,18 +1,20 @@
 # tinclib-firmware
 
 Firmware for the network co-processor that TINCLIB talks to. It speaks
-[tinclib-protocol](https://github.com/gavinhsmith/tinclib-protocol) **v0.3.0**
+[tinclib-protocol](https://github.com/gavinhsmith/tinclib-protocol) **v0.6**
 to the TI-84 Plus CE over UART, and handles the Wi-Fi and HTTP work for it.
-Protocol 0.3 covers plain-HTTP GET, Wi-Fi profiles (hidden networks included;
-the firmware decides how many slots it has) and a firmware-side Wi-Fi lock. HTTPS, TLS, NTP and POST arrive with
-later protocol versions.
+Protocol 0.6 covers HTTP and HTTPS (always verified against the CA roots built
+into the firmware) with GET, HEAD, POST, PUT, PATCH and DELETE, request bodies
+(`BODY_WRITE`), response headers (`HDR_GET`), the firmware version and board
+name (`INFO`), Wi-Fi profiles (hidden networks included; the firmware decides
+how many slots it has) and a firmware-side Wi-Fi lock.
 
 One shared core runs on every target. Each target adds a thin platform layer.
 
 | Target | Directory | PlatformIO env | Status |
 |---|---|---|---|
-| ESP8266 | `platforms/esp8266/` | `esp8266` | protocol 0.3, 5 Wi-Fi slots |
-| PC (Windows, Linux, macOS) | `platforms/pc/` | `pc` | protocol 0.3, 1 Wi-Fi slot, calculator plugged into the PC |
+| ESP8266 | `platforms/esp8266/` | `esp8266` | protocol 0.6, 5 Wi-Fi slots |
+| PC (Windows, Linux, macOS) | `platforms/pc/` | `pc` | protocol 0.6, 1 Wi-Fi slot, calculator plugged into the PC |
 | ESP32 | not started | | planned |
 
 ## Layout
@@ -62,15 +64,16 @@ Every packet is printed to stdout as it passes, one readable line each (`>` from
 reply); log lines (request states and errors) go to stderr:
 
 ```
-     3.102  calc > #2 HELLO v0.3 max_payload=256
-     3.103  calc < #2 HELLO ok v0.3 max_payload=1024 heap=1048576 wifi_slots=1
+     3.102  calc > #2 HELLO v0.6 max_payload=256
+     3.103  calc < #2 HELLO ok v0.6 max_payload=1024 heap=1048576 wifi_slots=1
      3.210  calc > #5 REQ_BEGIN GET http://api.example.com/v1/items?... (headers: 31 bytes, not shown)
      3.498  calc < #7 REQ_STATUS BODY http=200 len=812 type=application/json
      3.520  calc < #8 BODY_READ @0 200 bytes: "{\"items\":[{\"id\":1,\"name\":\"first\"},{\"id\":2,\"n"...
 ```
 
-The trace never shows request header text, URL query strings (they often carry API keys) or Wi-Fi
-passwords; it shows their lengths instead. Body data is cut to its first 48 bytes.
+The trace never shows request header text, request bodies, response header values, URL query strings
+(they often carry API keys) or Wi-Fi passwords; it shows their lengths instead. Response body data is cut
+to its first 48 bytes.
 
 ### Bridge mode: a real board, without powering it separately
 
@@ -118,7 +121,7 @@ interface doesn't offer, extend `tinc_platform.h` and the fake together.
 - The ESP8266 SDK doesn't report WPA2-Enterprise in scan results, so those
   networks can't be flagged as unsupported. Joining them simply fails.
 
-## Known protocol gaps (0.3)
+## Known protocol gaps (0.6)
 
 - The `WIFI_SET` comment in `protocol.h` says the ESP joins "the first
   reachable slot, 0 → wifi_slots-1". This firmware ranks candidates by RSSI instead, as

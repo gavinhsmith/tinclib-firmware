@@ -2,7 +2,10 @@
  * HTTP request state machine. One step per tinc_req_poll(); the body is
  * decoded (Content-Length / chunked / close-delimited) only as fast as the
  * CE pulls it with BODY_READ, so unread data backs up into TCP flow control.
+ * A request body goes the other way: BODY_WRITE hands it straight to TCP,
+ * taking only what fits, so nothing is buffered here.
  */
+#include <stdio.h>
 #include <string.h>
 #include "tinc_core.h"
 
@@ -10,15 +13,19 @@
 #define LINE_MAX  256                /* response header line */
 #define HOST_MAX  64
 #define STAGE_LEN 128
+/* Response headers kept for HDR_GET; Location has its own buffer so it is
+ * never lost to an overflow. */
+#define HSTORE_MAX 512
 /* ponytail: rough floor for lwIP + our buffers on plain TCP. TLS needs far
  * more; the platform checks that in tinc_plat_tls_start. */
 #define MIN_HEAP  6000u
 
 enum { B_LEN, B_CHUNK_SIZE, B_CHUNK_DATA, B_CHUNK_CRLF, B_TRAILER, B_CLOSE, B_DONE };
-enum { SEGS = 8 };
+enum { SEGS = 9 };
 
 static struct {
     uint8_t state, err, err_detail, flags, redirects, transcode;
+    uint8_t method;
     uint8_t tls, tls_on; /* url is https; handshake started */
     uint32_t timeout_ms, phase_at;
 
@@ -31,6 +38,10 @@ static struct {
     uint16_t seg_len[SEGS];
     uint8_t seg_i;
     uint16_t seg_off;
+    char clen_hdr[32]; /* "Content-Length: N\r\n" */
+
+    uint32_t up_len, up_sent; /* request body: content_len, bytes taken */
+    uint8_t responded;        /* the server answered before the upload finished */
 
     char line[LINE_MAX];
     uint16_t line_len;
@@ -38,6 +49,14 @@ static struct {
     uint16_t status;
     uint32_t clen;
     char ctype[TINC_CTYPE_MAX + 1];
+
+    /* final response's headers: [name_len u8][name][value_len u16][value]... */
+    uint8_t hstore[HSTORE_MAX];
+    uint16_t hstore_len;
+    uint8_t htrunc;
+    char loc[LINE_MAX];
+    uint16_t loc_len;
+    uint8_t has_loc;
 
     uint8_t body, cz_digits, cz_ext;
     uint32_t remain;
@@ -128,6 +147,41 @@ static int other_scheme(const char *u, uint16_t n)
     return i && iprefix(u + i, (uint16_t)(n - i), "://");
 }
 
+static const char *method_name(uint8_t m)
+{
+    switch (m) {
+    case TINC_METHOD_POST:   return "POST";
+    case TINC_METHOD_PUT:    return "PUT";
+    case TINC_METHOD_DELETE: return "DELETE";
+    case TINC_METHOD_PATCH:  return "PATCH";
+    case TINC_METHOD_HEAD:   return "HEAD";
+    }
+    return "GET";
+}
+
+/* An app header the ESP must generate (or refuse) itself. Every line is
+ * checked, split at a bare LF too, so none can hide behind another. */
+static int reserved_header(const char *h, uint16_t n)
+{
+    static const char *const names[] = {"host", "content-length", "transfer-encoding", "expect"};
+    uint16_t i = 0, name, end;
+    size_t k;
+
+    while (i < n) {
+        for (name = i; name < n && h[name] != ':' && h[name] != '\n'; name++)
+            ;
+        for (end = name; end > i && (h[end - 1] == ' ' || h[end - 1] == '\t'); end--)
+            ; /* "Host : x" is still Host to some servers */
+        for (k = 0; k < sizeof names / sizeof names[0]; k++)
+            if ((size_t)(end - i) == strlen(names[k]) && iprefix(h + i, (uint16_t)(end - i), names[k]))
+                return 1;
+        while (i < n && h[i] != '\n')
+            i++;
+        i++;
+    }
+    return 0;
+}
+
 /* Authority (host[:port]) of an http(s):// url of length n. */
 static uint16_t authority(const char *u, uint16_t n)
 {
@@ -177,8 +231,8 @@ static uint8_t parse_url(void)
     for (plen = 0; path + plen < u + n && path[plen] != '#'; plen++)
         ;
 
-    r.seg[0] = "GET ";
-    r.seg[1] = (plen == 0 || path[0] == '?') ? "/" : "";
+    r.seg[0] = method_name(r.method);
+    r.seg[1] = (plen == 0 || path[0] == '?') ? " /" : " ";
     r.seg[2] = path;
     r.seg_len[2] = plen;
     r.seg[3] = " HTTP/1.1\r\nHost: ";
@@ -186,11 +240,17 @@ static uint8_t parse_url(void)
     r.seg_len[4] = alen;
     r.seg[5] = "\r\nAccept-Encoding: identity\r\nConnection: close\r\n"
                "User-Agent: tinclib-firmware\r\n";
-    r.seg[6] = r.rq + r.url_len;
-    r.seg_len[6] = r.hdr_len;
-    r.seg[7] = "\r\n";
+    /* a body, or a method that usually has one (servers may want the 0) */
+    r.clen_hdr[0] = 0;
+    if (r.up_len || r.method == TINC_METHOD_POST || r.method == TINC_METHOD_PUT ||
+        r.method == TINC_METHOD_PATCH)
+        snprintf(r.clen_hdr, sizeof r.clen_hdr, "Content-Length: %lu\r\n", (unsigned long)r.up_len);
+    r.seg[6] = r.clen_hdr;
+    r.seg[7] = r.rq + r.url_len;
+    r.seg_len[7] = r.hdr_len;
+    r.seg[8] = "\r\n";
     for (i = 0; i < SEGS; i++)
-        if (i != 2 && i != 4 && i != 6)
+        if (i != 2 && i != 4 && i != 7)
             r.seg_len[i] = (uint16_t)strlen(r.seg[i]);
     return TINC_OK;
 }
@@ -210,11 +270,15 @@ static void start_connect(void)
     }
     r.seg_i = 0;
     r.seg_off = 0;
+    r.up_sent = 0;
+    r.responded = 0;
     r.line_len = 0;
     r.line_over = r.got_len = r.chunked = r.got_loc = 0;
     r.status = 0;
     r.clen = 0;
     r.ctype[0] = 0;
+    r.hstore_len = 0;
+    r.htrunc = r.has_loc = 0;
     r.st_pos = r.st_len = 0;
     r.tls_on = 0;
     memset(&r.tc, 0, sizeof r.tc);
@@ -234,9 +298,13 @@ void tinc_req_release(void)
     r.err_detail = 0;
     r.status = 0;
     r.ctype[0] = 0;
+    r.hstore_len = 0;
+    r.htrunc = r.has_loc = 0;
+    r.responded = 0;
+    r.up_len = r.up_sent = 0;
 }
 
-uint8_t tinc_req_begin(uint8_t flags, uint8_t timeout_s,
+uint8_t tinc_req_begin(uint8_t method, uint8_t flags, uint8_t timeout_s, uint32_t content_len,
                        const char *url, uint16_t url_len,
                        const char *hdrs, uint16_t hdr_len)
 {
@@ -246,15 +314,22 @@ uint8_t tinc_req_begin(uint8_t flags, uint8_t timeout_s,
     if (r.state != TINC_RS_IDLE && r.state != TINC_RS_DONE && r.state != TINC_RS_ERROR)
         return TINC_ERR_BUSY;
     tinc_req_release();
+    if (method < TINC_METHOD_GET || method > TINC_METHOD_HEAD || content_len == TINC_LEN_UNKNOWN ||
+        (content_len && (method == TINC_METHOD_GET || method == TINC_METHOD_HEAD)))
+        return TINC_ERR_BAD_ARG;
     if ((uint32_t)url_len + hdr_len > RQ_MAX)
         return TINC_ERR_BAD_LEN;
     /* each user header line must be CRLF-terminated */
     if (hdr_len && (hdr_len < 2 || hdrs[hdr_len - 2] != '\r' || hdrs[hdr_len - 1] != '\n'))
         return TINC_ERR_BAD_ARG;
+    if (reserved_header(hdrs, hdr_len))
+        return TINC_ERR_BAD_ARG;
     memcpy(r.rq, url, url_len);
     memcpy(r.rq + url_len, hdrs, hdr_len);
     r.url_len = url_len;
     r.hdr_len = hdr_len;
+    r.method = method;
+    r.up_len = content_len;
     if ((e = parse_url()) != TINC_OK)
         return e;
     tinc_plat_wifi_info(&w);
@@ -334,7 +409,7 @@ static uint32_t parse_dec(const char *s)
 static int header_line(void)
 {
     char *l = r.line, *v;
-    uint16_t n = r.line_len, name;
+    uint16_t n = r.line_len, name, vlen;
     uint8_t e;
 
     while (n && (l[n - 1] == ' ' || l[n - 1] == '\t'))
@@ -347,6 +422,9 @@ static int header_line(void)
             return 0;
         }
         r.status = (uint16_t)parse_dec(l + 9);
+        /* HDR_GET reads this response's headers, not a 1xx's before it */
+        r.hstore_len = 0;
+        r.htrunc = r.has_loc = 0;
         return 0;
     }
     if (n == 0) {
@@ -363,6 +441,29 @@ static int header_line(void)
     v = l + name + 1;
     while (*v == ' ' || *v == '\t')
         v++;
+    vlen = (uint16_t)strlen(v);
+
+    if (name == 8 && iprefix(l, n, "location")) {
+        /* ponytail: a Location line longer than LINE_MAX fails the request
+         * rather than be kept cut short; raise LINE_MAX if one shows up */
+        if (r.line_over) {
+            fail(TINC_ERR_HTTP_PROTO);
+            return 0;
+        }
+        memcpy(r.loc, v, vlen);
+        r.loc_len = vlen;
+        r.has_loc = 1;
+    } else if (r.line_over || name > 255 ||
+               (uint32_t)r.hstore_len + 3 + name + vlen > HSTORE_MAX) {
+        r.htrunc = 1; /* dropped whole rather than kept cut short */
+    } else {
+        r.hstore[r.hstore_len++] = (uint8_t)name;
+        memcpy(r.hstore + r.hstore_len, l, name);
+        r.hstore_len = (uint16_t)(r.hstore_len + name);
+        tinc_put_u16(r.hstore + r.hstore_len, vlen);
+        memcpy(r.hstore + r.hstore_len + 2, v, vlen);
+        r.hstore_len = (uint16_t)(r.hstore_len + 2 + vlen);
+    }
 
     if (name == 14 && iprefix(l, n, "content-length")) {
         r.clen = parse_dec(v);
@@ -374,8 +475,11 @@ static int header_line(void)
     } else if (name == 12 && iprefix(l, n, "content-type")) {
         strncpy(r.ctype, v, TINC_CTYPE_MAX);
         r.ctype[TINC_CTYPE_MAX] = 0;
-    } else if (name == 8 && iprefix(l, n, "location") && r.status >= 300 && r.status < 400) {
-        e = r.line_over ? TINC_ERR_HTTP_PROTO : set_location(v, (uint16_t)strlen(v));
+    } else if (name == 8 && iprefix(l, n, "location") && r.status >= 300 && r.status < 400 &&
+               (r.method == TINC_METHOD_GET || r.method == TINC_METHOD_HEAD)) {
+        /* Other methods get the 3xx as the response (HDR_GET reads
+         * Location): following it would mean resending the body. */
+        e = set_location(v, vlen);
         if (e != TINC_OK) {
             fail(e);
             return 0;
@@ -399,15 +503,16 @@ static void headers_done(void)
     r.remain = 0;
     r.cz_digits = r.cz_ext = 0;
     r.tr_len = 0;
-    if (r.status == 204 || r.status == 304)
-        r.body = B_DONE;
+    if (r.status == 204 || r.status == 304 || r.method == TINC_METHOD_HEAD)
+        r.body = B_DONE; /* HEAD: Content-Length describes the GET's body */
     else if (r.chunked)
         r.body = B_CHUNK_SIZE;
     else if (r.got_len)
         r.body = (r.remain = r.clen) ? B_LEN : B_DONE;
     else
         r.body = B_CLOSE;
-    r.transcode = (r.flags & TINC_REQF_TRANSCODE) && tinc_tc_applies(r.ctype);
+    r.transcode = (r.flags & TINC_REQF_TRANSCODE) && r.method != TINC_METHOD_HEAD &&
+                  tinc_tc_applies(r.ctype);
     set_state(TINC_RS_BODY);
 }
 
@@ -527,7 +632,8 @@ void tinc_req_mark_done(void)
     set_state(TINC_RS_DONE);
 }
 
-static void send_some(void)
+/* Request line and headers; 1 once they're all out. */
+static int send_headers(void)
 {
     while (r.seg_i < SEGS) {
         uint16_t left = (uint16_t)(r.seg_len[r.seg_i] - r.seg_off), w;
@@ -536,12 +642,52 @@ static void send_some(void)
             w = tinc_plat_tcp_write((const uint8_t *)r.seg[r.seg_i] + r.seg_off, left);
             r.seg_off = (uint16_t)(r.seg_off + w);
             if (w < left)
-                return; /* send buffer full; continue next poll */
+                return 0; /* send buffer full; continue next poll */
         }
         r.seg_i++;
         r.seg_off = 0;
     }
+    return 1;
+}
+
+static void send_some(void)
+{
+    if (send_headers() && r.up_sent == r.up_len)
+        set_state(TINC_RS_WAIT_HEADERS);
+}
+
+/* Mid-upload: has the server already answered (401, 413, ...)? Then stop
+ * sending and read the response. */
+static int early_response(void)
+{
+    if (r.seg_i < SEGS || r.up_sent == r.up_len)
+        return 0;
+    if (r.st_pos == r.st_len) {
+        r.st_pos = 0;
+        r.st_len = tinc_plat_tcp_read(r.stage, STAGE_LEN);
+    }
+    if (r.st_pos == r.st_len)
+        return 0;
+    r.responded = 1;
     set_state(TINC_RS_WAIT_HEADERS);
+    return 1;
+}
+
+uint16_t tinc_req_write(const uint8_t *p, uint16_t n)
+{
+    uint16_t w;
+
+    if (r.state != TINC_RS_SENDING || !send_headers())
+        return 0;
+    if (n > r.up_len - r.up_sent)
+        n = (uint16_t)(r.up_len - r.up_sent);
+    w = tinc_plat_tcp_write(p, n);
+    r.up_sent += w;
+    if (w)
+        r.phase_at = tinc_plat_millis(); /* SENDING times out on no progress */
+    if (r.up_sent == r.up_len)
+        set_state(TINC_RS_WAIT_HEADERS);
+    return w;
 }
 
 void tinc_req_poll(void)
@@ -579,6 +725,9 @@ void tinc_req_poll(void)
         fail_detail(TINC_ERR_TLS, TINC_TLSR_OTHER); /* server hung up mid-handshake */
         return;
     }
+    /* a server that answers early may close at once; its reply still counts */
+    if (r.state == TINC_RS_SENDING && (t == TINC_TCP_OPEN || t == TINC_TCP_CLOSED) && early_response())
+        return;
     if (t == TINC_TCP_ERR_CONNECT || t == TINC_TCP_IDLE ||
         (t == TINC_TCP_CLOSED && r.state <= TINC_RS_SENDING)) {
         fail(TINC_ERR_CONNECT);
@@ -654,6 +803,40 @@ uint8_t tinc_req_err(void) { return r.err; }
 uint8_t tinc_req_err_detail(void) { return r.err_detail; }
 uint16_t tinc_req_http_status(void) { return r.status; }
 const char *tinc_req_ctype(void) { return r.ctype; }
+uint32_t tinc_req_body_len(void) { return r.up_len; }
+uint32_t tinc_req_body_sent(void) { return r.up_sent; }
+int tinc_req_responded(void) { return r.responded; }
+int tinc_req_hdr_trunc(void) { return r.htrunc; }
+
+int tinc_req_header(const char *name, uint8_t name_len, uint8_t index,
+                    const char **val, uint16_t *val_len)
+{
+    uint16_t i = 0, nl, vl;
+
+    if (name_len == 8 && iprefix(name, 8, "location")) {
+        if (!r.has_loc || index)
+            return 0;
+        *val = r.loc;
+        *val_len = r.loc_len;
+        return 1;
+    }
+    while (i < r.hstore_len) {
+        nl = r.hstore[i];
+        vl = tinc_get_u16(r.hstore + i + 1 + nl);
+        if (nl == name_len) {
+            uint16_t k;
+            for (k = 0; k < nl && lower((unsigned char)r.hstore[i + 1 + k]) == lower((unsigned char)name[k]); k++)
+                ;
+            if (k == nl && index-- == 0) {
+                *val = (const char *)r.hstore + i + 3 + nl;
+                *val_len = vl;
+                return 1;
+            }
+        }
+        i = (uint16_t)(i + 3 + nl + vl);
+    }
+    return 0;
+}
 
 uint32_t tinc_req_content_len(void)
 {

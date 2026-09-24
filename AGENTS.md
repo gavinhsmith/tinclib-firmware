@@ -15,7 +15,7 @@ core so every target gets it for free; a platform layer only adapts one
 target's APIs to the core's interface.
 
 Consumes `tinclib-protocol` as a **git submodule** at
-`external/tinclib-protocol`, pinned to a release tag (currently `v0.4.0`),
+`external/tinclib-protocol`, pinned to a release tag (currently `v0.6`),
 and compiled in place by `lib/tinc_core/proto.c`. **Never fork or hand-copy
 `protocol.h`/`crc16.c`/`tinc_frame.c` into this repo.** If the shared
 protocol seems to need a change to support something the firmware needs,
@@ -181,7 +181,8 @@ the core is sized for the smallest target and must stay that way.
 
 ## TLS / certificate policy — do not change without flagging it
 
-HTTPS arrived in protocol 0.4 (GET, always verified). The policy is
+HTTPS arrived in protocol 0.4 (always verified); 0.5 added the other
+methods, request bodies and `HDR_GET`. The policy is
 chip-independent; the library under it differs per chip (BearSSL on
 ESP8266, mbedTLS on ESP32). The core owns the TLS *phase* (wait for the
 clock, then `tinc_plat_tls_start`, redirect rules, error reporting); the
@@ -200,7 +201,7 @@ update the roots, replace `certs/cacert.pem` and rebuild. Rules that follow:
 - Insecure mode is a **global TINCLIBC-controlled setting**, off by
   default, and a request's `INSECURE` flag only takes effect if that global
   setting is also on. See `tinclib-protocol`'s `ERR_INSECURE_DISABLED`.
-  Both are reserved, not in 0.4.
+  Both are reserved, not in 0.6.
 - BearSSL on ESP8266 tops out at **TLS 1.2** — a server requiring TLS 1.3
   fails; that's expected and surfaces as `ERR_TLS` / `TINC_TLSR_VERSION`,
   not a crash or a hang. Don't assume ESP32 has the same limit, or that it
@@ -216,7 +217,13 @@ update the roots, replace `certs/cacert.pem` and rebuild. Rules that follow:
 - The handshake is pumped one record per loop iteration (the ESP8266 runs
   BearSSL's crypto on the Arduino core's stack thunk, at 160 MHz). A single
   big-number operation can't be split, so measure reply latency on
-  hardware when touching this.
+  hardware when touching this (the PC bridge's trace timestamps show it).
+  Protocol 0.6 allows `TINC_REPLY_TIMEOUT_TLS_MS` (1 s) per reply while a
+  request is in `TLS`, and only there. Measured on the ESP8266 against
+  raw.githubusercontent.com: one ~850 ms step with X25519, two of ~470 and
+  ~515 ms with P-256. So `lib/tinc_tls` doesn't offer X25519 (its key
+  generation has no precomputed table there); keep that unless it's
+  re-measured.
 - Both BearSSL targets share `lib/tinc_tls`: the ESP8266 links the BearSSL
   in its Arduino core, the PC builds the same fork from `external/bearssl`,
   so the PC matches the board on the wire (TLS 1.2 ceiling, same roots, same
