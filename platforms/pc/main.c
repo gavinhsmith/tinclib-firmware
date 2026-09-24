@@ -160,7 +160,7 @@ static int port_open(struct port *p, const char *name, int board)
     DCB d;
     COMMTIMEOUTS t = {MAXDWORD, 0, 0, 0, 0}; /* reads return at once; writes never time out */
 
-    snprintf(path, sizeof path, "\\.\%s", name);
+    snprintf(path, sizeof path, "\\\\.\\%s", name);
     p->h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
                        FILE_FLAG_OVERLAPPED, NULL);
     if (p->h == INVALID_HANDLE_VALUE) {
