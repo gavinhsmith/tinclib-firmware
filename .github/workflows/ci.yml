@@ -91,7 +91,9 @@ jobs:
       # the PC target end to end: a pty plays the calculator, a local HTTP server the internet
       - name: End-to-end test
         if: matrix.target == 'pc' && runner.os != 'Windows'
-        run: python test/pc/e2e.py ./${{ matrix.asset }}
+        run: |
+          python test/pc/e2e.py ./${{ matrix.asset }}
+          python test/pc/e2e.py ./${{ matrix.asset }} --bridge
 
       - uses: actions/upload-artifact@v4
         with:

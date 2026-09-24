@@ -3,6 +3,10 @@ calculator over a pseudo-terminal, the app under test is the board, and a
 local HTTP server is the internet.
 
     python test/pc/e2e.py .pio/build/pc/program
+    python test/pc/e2e.py .pio/build/pc/program --bridge
+
+With --bridge the same test runs through bridge mode: calculator pty ->
+`program PORT --bridge BOARD` -> a second copy of the app playing the board.
 """
 import binascii
 import http.server
@@ -97,16 +101,37 @@ def get(link, url):
     raise AssertionError("body never finished")
 
 
+def relay(a, b):
+    """Copy bytes both ways between two pty masters, forever."""
+    while True:
+        for fd in select.select([a, b], [], [])[0]:
+            os.write(b if fd == a else a, os.read(fd, 4096))
+
+
+def raw_pty():
+    master, slave = pty.openpty()
+    tty.setraw(master)
+    return master, slave
+
+
 def main():
     app = sys.argv[1]
+    bridged = sys.argv[2:] == ["--bridge"]
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = "http://127.0.0.1:%d" % srv.server_address[1]
 
-    master, slave = pty.openpty()
-    tty.setraw(master)
+    master, slave = raw_pty()
     trace = tempfile.TemporaryFile(mode="w+")  # the app's packet trace (stdout)
-    proc = subprocess.Popen([app, os.ttyname(slave)], stdout=trace)
+    procs = []
+    if bridged:
+        # two ptys joined by a relay stand in for the board's USB-UART cable
+        (bm, bs), (am, as_) = raw_pty(), raw_pty()
+        threading.Thread(target=relay, args=(bm, am), daemon=True).start()
+        procs.append(subprocess.Popen([app, os.ttyname(bs)], stdout=subprocess.DEVNULL))
+        procs.append(subprocess.Popen([app, os.ttyname(slave), "--bridge", os.ttyname(as_)], stdout=trace))
+    else:
+        procs.append(subprocess.Popen([app, os.ttyname(slave)], stdout=trace))
     try:
         link = Link(master)
         time.sleep(0.5)  # app opens the port
@@ -159,8 +184,9 @@ def main():
         assert flags == 1 and r == b"\x03LAN\x00", r
         print("ok  one Wi-Fi slot, LAN, locked")
     finally:
-        proc.terminate()
-        proc.wait(5)
+        for proc in procs:
+            proc.terminate()
+            proc.wait(5)
         srv.shutdown()
 
     trace.seek(0)

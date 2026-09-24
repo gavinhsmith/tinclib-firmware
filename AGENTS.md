@@ -70,6 +70,9 @@ extend `tinc_platform.h` and `test/fake_platform.h` together.
   a board on the wire: same core, same errors, same non-blocking rules
   (DNS runs on a thread because `getaddrinfo` blocks). It is a development
   and no-hardware stand-in, not a replacement for the ESP targets.
+  `program PORT --bridge BOARD_PORT` instead passes bytes through unchanged
+  to a real board plugged into the same PC, with the same packet trace (for
+  testing a board that has no power of its own yet). It runs no core logic.
 - Confirm actual flash size per board (`esptool.py flash_id`) rather than
   assuming — don't hardcode a flash-size assumption into partition/LittleFS
   layout without checking.

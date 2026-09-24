@@ -72,7 +72,20 @@ reply); log lines (request states and errors) go to stderr:
 The trace never shows request header text, URL query strings (they often carry API keys) or Wi-Fi
 passwords; it shows their lengths instead. Body data is cut to its first 48 bytes.
 
-`test/pc/e2e.py` tests it end to end: a pseudo-terminal plays the calculator and a local HTTP server the
+### Bridge mode: a real board, without powering it separately
+
+To test a real board with the calculator before it has its own power, plug both into the PC (the board
+is powered by its USB) and bridge the two ports:
+
+```sh
+.pio/build/pc/program COM7 --bridge COM5    # calculator's port, then the board's
+```
+
+Everything is passed through unchanged, and every packet is traced exactly as above; the board, not the
+app, answers the calculator. The board port's DTR and RTS are kept off so the dev board's auto-reset
+circuit doesn't hold the ESP in reset. Either side can be unplugged and comes back on its own.
+
+`test/pc/e2e.py` tests it end to end (add `--bridge` to run the same test through bridge mode): a pseudo-terminal plays the calculator and a local HTTP server the
 internet (Linux and macOS; CI runs it on both).
 
 ## Adding a target
