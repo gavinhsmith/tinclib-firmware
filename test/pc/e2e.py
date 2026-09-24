@@ -113,13 +113,14 @@ def main():
 
         flags, r = link.call(0x02)  # before HELLO
         assert flags == 5 and r[0] == 0x02, "want ERR_NO_HELLO, got %r %r" % (flags, r)
-        flags, r = link.call(0x01, bytes([0, 3, 0, 0, 0, 4]))
-        assert flags == 1 and r[:2] == b"\x00\x03", "HELLO: %r %r" % (flags, r)
+        flags, r = link.call(0x01, bytes([0, 4, 0, 0, 0, 4]))
+        assert flags == 1 and r[:2] == b"\x00\x04", "HELLO: %r %r" % (flags, r)
         assert len(r) == 11 and r[10] == 1, "HELLO should report 1 Wi-Fi slot: %r" % r
         flags, r = link.call(0x02)
         assert flags == 1 and len(r) == 13, "STATUS: %r" % r
         assert r[0] == 2 and r[1] == 0, "STATUS should say connected, slot 0: %r" % r
         assert r[12] & 1, "STATUS should report the Wi-Fi lock: %r" % r
+        assert r[12] & 2, "STATUS should report a valid clock: %r" % r
 
         err, status, body = get(link, base + "/data")
         assert (err, status, body) == (0, 200, BODY), "err=0x%02X status=%r len=%d" % (err, status, len(body or b""))
