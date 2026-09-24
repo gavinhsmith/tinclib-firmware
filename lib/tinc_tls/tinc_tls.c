@@ -56,6 +56,7 @@ struct tls_ctx {
 #define TLS_HEAP_SPARE 12000u /* ESP8266 stack thunk (~6 KB) + lwIP headroom */
 
 static struct tls_ctx *tls;
+static br_ec_impl no_x25519; /* the default EC code, minus Curve25519 */
 static uint8_t tls_fail, tls_detail; /* set once the handshake fails */
 static int tls_when;                  /* -1 cert not yet valid, +1 expired */
 
@@ -171,6 +172,12 @@ uint8_t tinc_plat_tls_start(const char *host)
         return TINC_ERR_NO_MEM;
     stack_thunk_add_ref();
     br_ssl_client_init_full(&tls->cc, &tls->xc, NULL, 0);
+    /* Don't offer X25519, so ECDHE servers pick P-256: its key generation
+     * uses a precomputed table, and X25519's two unsplittable scalar
+     * multiplications took ~850 ms on the ESP8266, longer than the CE waits. */
+    no_x25519 = *br_ssl_engine_get_ec(&tls->cc.eng);
+    no_x25519.supported_curves &= ~((uint32_t)1 << BR_EC_curve25519);
+    br_ssl_engine_set_ec(&tls->cc.eng, &no_x25519);
     br_x509_minimal_set_dynamic(&tls->xc, NULL, find_ta, free_ta);
     br_x509_minimal_set_time_callback(&tls->xc, NULL, check_time);
     br_ssl_engine_set_buffer(&tls->cc.eng, tls->buf, sizeof tls->buf, 0);
