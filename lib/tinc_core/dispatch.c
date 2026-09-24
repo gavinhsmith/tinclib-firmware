@@ -62,12 +62,13 @@ static uint16_t err(uint8_t type, uint8_t seq, uint8_t e)
     return tinc_frame_encode(reply, TINC_FLAG_RESP | TINC_FLAG_ERR, type, seq, PL, 1);
 }
 
-/* A request error, as BODY_READ reports it: err, err_detail. */
-static uint16_t req_err(uint8_t seq)
+/* The request's own error, as BODY_READ/BODY_WRITE/HDR_GET report it in
+ * ERROR: err, err_detail. */
+static uint16_t req_err(uint8_t type, uint8_t seq)
 {
     PL[0] = tinc_req_err();
     PL[1] = tinc_req_err_detail();
-    return tinc_frame_encode(reply, TINC_FLAG_RESP | TINC_FLAG_ERR, TINC_T_BODY_READ, seq, PL, 2);
+    return tinc_frame_encode(reply, TINC_FLAG_RESP | TINC_FLAG_ERR, type, seq, PL, 2);
 }
 
 static uint16_t hello(uint8_t seq, const uint8_t *pl, uint16_t len)
@@ -128,9 +129,8 @@ static uint16_t req_begin(uint8_t seq, const uint8_t *pl, uint16_t len)
     hl = tinc_get_u16(pl + TINC_BEGIN_HDR_LEN);
     if ((uint32_t)TINC_BEGIN_URL + ul + hl > len)
         return err(TINC_T_REQ_BEGIN, seq, TINC_ERR_BAD_LEN);
-    if (pl[TINC_BEGIN_METHOD] != TINC_METHOD_GET || tinc_get_u32(pl + TINC_BEGIN_CONTENT_LEN) != 0)
-        return err(TINC_T_REQ_BEGIN, seq, TINC_ERR_BAD_ARG);
-    e = tinc_req_begin(pl[TINC_BEGIN_FLAGS], pl[TINC_BEGIN_TIMEOUT_S],
+    e = tinc_req_begin(pl[TINC_BEGIN_METHOD], pl[TINC_BEGIN_FLAGS], pl[TINC_BEGIN_TIMEOUT_S],
+                       tinc_get_u32(pl + TINC_BEGIN_CONTENT_LEN),
                        (const char *)pl + TINC_BEGIN_URL, ul,
                        (const char *)pl + TINC_BEGIN_URL + ul, hl);
     if (e == TINC_ERR_BUSY)
@@ -176,7 +176,7 @@ static uint16_t body_read(uint8_t seq, const uint8_t *pl, uint16_t len, int fina
     if (len < TINC_READ_REQ_LEN)
         return err(TINC_T_BODY_READ, seq, TINC_ERR_BAD_LEN);
     if (st == TINC_RS_ERROR)
-        return req_err(seq);
+        return req_err(TINC_T_BODY_READ, seq);
     if (st != TINC_RS_BODY && st != TINC_RS_DONE)
         return err(TINC_T_BODY_READ, seq, TINC_ERR_BAD_STATE);
 
@@ -193,7 +193,7 @@ static uint16_t body_read(uint8_t seq, const uint8_t *pl, uint16_t len, int fina
     n = st == TINC_RS_DONE ? 0 : tinc_req_read(chunk, cap, &eof);
     if (tinc_req_state() == TINC_RS_ERROR) {
         waiting = 0;
-        return req_err(seq);
+        return req_err(TINC_T_BODY_READ, seq);
     }
     if (!n && !eof) {
         now = tinc_plat_millis();
@@ -213,6 +213,110 @@ static uint16_t body_read(uint8_t seq, const uint8_t *pl, uint16_t len, int fina
     have_chunk = n > 0; /* an empty chunk is never cached */
     chunk_eof = (uint8_t)eof;
     return body_reply(seq, off, n, eof);
+}
+
+/* Start (or keep) the long-poll clock; 1 while the hold should go on. */
+static int hold(uint8_t wait, int final)
+{
+    uint32_t now = tinc_plat_millis();
+
+    if (!waiting) {
+        wait_until = now + (wait > TINC_WAIT_MS_MAX ? TINC_WAIT_MS_MAX : wait);
+        waiting = 1;
+    }
+    if (!final && (int32_t)(wait_until - now) > 0)
+        return 1;
+    waiting = 0;
+    return 0;
+}
+
+static uint16_t write_reply(uint8_t seq)
+{
+    tinc_put_u32(PL + TINC_WRITE_NEXT_OFFSET, tinc_req_body_sent());
+    PL[TINC_WRITE_FLAGS] = tinc_req_responded() ? TINC_WRITEF_RESPONDED : 0;
+    return ok(TINC_T_BODY_WRITE, seq, TINC_WRITE_RESP_LEN);
+}
+
+/* Request body: take what fits. Before SENDING nothing is taken, so the
+ * CE's write loop doubles as its connect poll. */
+static uint16_t body_write(uint8_t seq, const uint8_t *pl, uint16_t len, int final)
+{
+    uint8_t st = tinc_req_state();
+    uint16_t n = (uint16_t)(len - TINC_WRITE_DATA);
+    uint32_t off, next = tinc_req_body_sent();
+
+    if (len < TINC_WRITE_DATA)
+        return err(TINC_T_BODY_WRITE, seq, TINC_ERR_BAD_LEN);
+    if (st == TINC_RS_ERROR)
+        return req_err(TINC_T_BODY_WRITE, seq);
+    if (st == TINC_RS_IDLE || (st >= TINC_RS_WAIT_HEADERS && !tinc_req_responded()))
+        return err(TINC_T_BODY_WRITE, seq, TINC_ERR_BAD_STATE);
+    if (st >= TINC_RS_WAIT_HEADERS)
+        return write_reply(seq); /* RESPONDED: the upload is over, read the response */
+    off = tinc_get_u32(pl + TINC_WRITE_OFFSET);
+    if (off != next) {
+        PL[0] = TINC_ERR_BAD_OFFSET;
+        tinc_put_u32(PL + 1, next);
+        return tinc_frame_encode(reply, TINC_FLAG_RESP | TINC_FLAG_ERR, TINC_T_BODY_WRITE, seq, PL, 5);
+    }
+    if (off + n > tinc_req_body_len())
+        return err(TINC_T_BODY_WRITE, seq, TINC_ERR_BAD_ARG);
+    if (!tinc_req_write(pl + TINC_WRITE_DATA, n) && n) {
+        if (tinc_req_state() == TINC_RS_ERROR) {
+            waiting = 0;
+            return req_err(TINC_T_BODY_WRITE, seq);
+        }
+        if (!tinc_req_responded() && hold(pl[TINC_WRITE_WAIT_MS], final))
+            return TINC_PENDING; /* for send-buffer room, or the connection */
+    }
+    waiting = 0;
+    return write_reply(seq);
+}
+
+/* One response header value, paged by offset. */
+static uint16_t hdr_get(uint8_t seq, const uint8_t *pl, uint16_t len)
+{
+    uint8_t st = tinc_req_state(), nl;
+    uint16_t off, vl = 0, n, room = (uint16_t)(peer_max - TINC_HGET_DATA);
+    const char *v = NULL;
+    int found;
+
+    if (len < TINC_HGET_NAME || len < TINC_HGET_NAME + pl[TINC_HGET_NAME_LEN])
+        return err(TINC_T_HDR_GET, seq, TINC_ERR_BAD_LEN);
+    nl = pl[TINC_HGET_NAME_LEN];
+    if (!nl)
+        return err(TINC_T_HDR_GET, seq, TINC_ERR_BAD_ARG);
+    if (st == TINC_RS_ERROR)
+        return req_err(TINC_T_HDR_GET, seq);
+    if (st != TINC_RS_BODY && st != TINC_RS_DONE)
+        return err(TINC_T_HDR_GET, seq, TINC_ERR_BAD_STATE);
+    found = tinc_req_header((const char *)pl + TINC_HGET_NAME, nl, pl[TINC_HGET_INDEX], &v, &vl);
+    off = tinc_get_u16(pl + TINC_HGET_OFFSET);
+    if (off > vl)
+        return err(TINC_T_HDR_GET, seq, TINC_ERR_BAD_OFFSET);
+    n = (uint16_t)(vl - off) < room ? (uint16_t)(vl - off) : room;
+    PL[TINC_HGET_FLAGS] = (found ? TINC_HGETF_FOUND : 0) | (tinc_req_hdr_trunc() ? TINC_HGETF_TRUNC : 0);
+    tinc_put_u16(PL + TINC_HGET_TOTAL_LEN, vl);
+    if (n)
+        memcpy(PL + TINC_HGET_DATA, v + off, n);
+    return ok(TINC_T_HDR_GET, seq, (uint16_t)(TINC_HGET_DATA + n));
+}
+
+static uint8_t put_str(uint8_t *p, const char *s)
+{
+    uint8_t n = (uint8_t)(strlen(s) < TINC_INFO_STR_MAX ? strlen(s) : TINC_INFO_STR_MAX);
+
+    p[0] = n;
+    memcpy(p + 1, s, n);
+    return (uint8_t)(n + 1);
+}
+
+static uint16_t info(uint8_t seq)
+{
+    uint8_t n = put_str(PL, TINC_FW_VERSION);
+
+    n = (uint8_t)(n + put_str(PL + n, TINC_BOARD_NAME));
+    return ok(TINC_T_INFO, seq, n);
 }
 
 /* One slot per frame: ssid_len, ssid, wflags. Never the password. */
@@ -312,8 +416,11 @@ uint16_t tinc_dispatch(uint8_t type, uint8_t seq, const uint8_t *pl,
 
     switch (type) {
     case TINC_T_STATUS:      n = status(seq); break;
+    case TINC_T_INFO:        n = info(seq); break;
     case TINC_T_REQ_BEGIN:   n = req_begin(seq, pl, len); break;
     case TINC_T_REQ_STATUS:  n = req_status(seq); break;
+    case TINC_T_HDR_GET:     n = hdr_get(seq, pl, len); break;
+    case TINC_T_BODY_WRITE:  n = body_write(seq, pl, len, final); break;
     case TINC_T_REQ_ABORT:   tinc_req_release(); reset_body(); n = ok(type, seq, 0); break;
     case TINC_T_BODY_READ:   n = body_read(seq, pl, len, final); break;
     case TINC_T_WIFI_GET:    n = wifi_get(seq, pl, len); break;
@@ -322,6 +429,7 @@ uint16_t tinc_dispatch(uint8_t type, uint8_t seq, const uint8_t *pl,
     default:                 n = err(type, seq, TINC_ERR_UNSUPPORTED); break;
     }
     if (n != TINC_PENDING) {
+        waiting = 0; /* whatever ended a hold, the next one starts fresh */
         cache_ok = 1;
         cache_type = type;
         cache_seq = seq;

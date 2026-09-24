@@ -62,19 +62,58 @@ static void hello(void)
     expect_ok();
 }
 
-static void begin(const char *url, const char *hdrs, uint8_t flags)
+static void begin_m(uint8_t method, uint32_t clen, const char *url, const char *hdrs, uint8_t flags)
 {
     static uint8_t pl[TINC_PAYLOAD_LIMIT];
     uint16_t ul = (uint16_t)strlen(url), hl = (uint16_t)strlen(hdrs);
 
     memset(pl, 0, TINC_BEGIN_URL);
-    pl[TINC_BEGIN_METHOD] = TINC_METHOD_GET;
+    pl[TINC_BEGIN_METHOD] = method;
     pl[TINC_BEGIN_FLAGS] = flags;
+    tinc_put_u32(pl + TINC_BEGIN_CONTENT_LEN, clen);
     tinc_put_u16(pl + TINC_BEGIN_URL_LEN, ul);
     tinc_put_u16(pl + TINC_BEGIN_HDR_LEN, hl);
     memcpy(pl + TINC_BEGIN_URL, url, ul);
     memcpy(pl + TINC_BEGIN_URL + ul, hdrs, hl);
     send(TINC_T_REQ_BEGIN, pl, (uint16_t)(TINC_BEGIN_URL + ul + hl));
+}
+
+static void begin(const char *url, const char *hdrs, uint8_t flags)
+{
+    begin_m(TINC_METHOD_GET, 0, url, hdrs, flags);
+}
+
+static uint16_t body_write_at(uint8_t seq, uint32_t off, uint8_t wait, const char *data, int final)
+{
+    static uint8_t pl[TINC_PAYLOAD_LIMIT];
+    uint16_t n = (uint16_t)strlen(data);
+
+    tinc_put_u32(pl + TINC_WRITE_OFFSET, off);
+    pl[TINC_WRITE_WAIT_MS] = wait;
+    memcpy(pl + TINC_WRITE_DATA, data, n);
+    return send_final(TINC_T_BODY_WRITE, seq, pl, (uint16_t)(TINC_WRITE_DATA + n), final);
+}
+
+static uint16_t body_write(uint32_t off, const char *data)
+{
+    return body_write_at(++seqn, off, 0, data, 1);
+}
+
+static uint16_t hdr_get_at(uint8_t seq, const char *name, uint8_t index, uint16_t off)
+{
+    uint8_t pl[64];
+    uint8_t n = (uint8_t)strlen(name);
+
+    pl[TINC_HGET_INDEX] = index;
+    tinc_put_u16(pl + TINC_HGET_OFFSET, off);
+    pl[TINC_HGET_NAME_LEN] = n;
+    memcpy(pl + TINC_HGET_NAME, name, n);
+    return send_final(TINC_T_HDR_GET, seq, pl, (uint16_t)(TINC_HGET_NAME + n), 1);
+}
+
+static uint16_t hdr_get(const char *name, uint8_t index, uint16_t off)
+{
+    return hdr_get_at(++seqn, name, index, off);
 }
 
 static void pump(int n)
@@ -208,7 +247,7 @@ static void test_golden_errors(void)
     uint8_t rd[TINC_READ_REQ_LEN] = {0};
 
     hello();
-    send_final(0x13, 14, NULL, 0, 1);
+    send_final(0x12, 14, NULL, 0, 1);
     expect_vec(tv_err_unsupported, sizeof tv_err_unsupported);
 
     tinc_put_u16(pl + TINC_BEGIN_URL_LEN, sizeof ftp - 1);
@@ -336,6 +375,386 @@ static void test_golden_wifi_lock(void)
     TEST_ASSERT_EQUAL_HEX8_ARRAY("\x04Kept\x00", RPL, 6);
 }
 
+static void test_golden_info(void)
+{
+    send_vec(tv_hello_req, sizeof tv_hello_req);
+    send_vec(tv_info_req, sizeof tv_info_req);
+    expect_vec(tv_info_resp, sizeof tv_info_resp);
+}
+
+/* https POST up to SENDING, with the request line and headers out */
+static void post_to_sending(void)
+{
+    send_vec(tv_req_begin_req_post, sizeof tv_req_begin_req_post);
+    expect_vec(tv_req_begin_resp, sizeof tv_req_begin_resp);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(2); /* CONNECTING -> TLS -> handshake started */
+    TEST_ASSERT_EQUAL(TINC_RS_TLS, tinc_req_state());
+    fk_tcp = TINC_TCP_OPEN;
+    pump(2);
+    TEST_ASSERT_EQUAL(TINC_RS_SENDING, tinc_req_state());
+    assert_prefix("POST /api?q=1 HTTP/1.1\r\nHost: example.com\r\n", fk_sent);
+    TEST_ASSERT_NOT_NULL(strstr(fk_sent, "\r\nContent-Length: 22\r\n"));
+    TEST_ASSERT_NOT_NULL(strstr(fk_sent, "\r\nContent-Type: application/json\r\n\r\n"));
+}
+
+static void test_golden_body_write(void)
+{
+    uint8_t late[TINC_WRITE_DATA + 4] = {0, 0, 0, 0, 0, 'x', 'x', 'x', 'x'};
+    uint16_t hdr_end;
+
+    send_vec(tv_hello_req, sizeof tv_hello_req);
+    send_vec(tv_req_begin_req_post, sizeof tv_req_begin_req_post);
+    /* before SENDING nothing is taken: the write loop is the connect poll */
+    send_final(TINC_T_BODY_WRITE, 23, late, sizeof late, 1);
+    expect_vec(tv_body_write_resp_none, sizeof tv_body_write_resp_none);
+    send_vec(tv_req_abort_req, sizeof tv_req_abort_req);
+
+    post_to_sending();
+    hdr_end = fk_sent_len;
+    fk_write_max = 8; /* the send buffer takes 8 bytes */
+    send_vec(tv_body_write_req, sizeof tv_body_write_req);
+    expect_vec(tv_body_write_resp_partial, sizeof tv_body_write_resp_partial);
+
+    /* resending from the wrong offset tells the CE where to continue */
+    tinc_put_u32(late + TINC_WRITE_OFFSET, 0);
+    send_final(TINC_T_BODY_WRITE, 25, late, sizeof late, 1);
+    expect_vec(tv_err_write_bad_offset, sizeof tv_err_write_bad_offset);
+    {
+        static const char past[] = "\"calc\",\"n\":84}!"; /* one byte over */
+        uint8_t pl[TINC_WRITE_DATA + sizeof past] = {8, 0, 0, 0, 0};
+        memcpy(pl + TINC_WRITE_DATA, past, sizeof past - 1);
+        send_final(TINC_T_BODY_WRITE, 26, pl, (uint16_t)(TINC_WRITE_DATA + sizeof past - 1), 1);
+        expect_vec(tv_err_write_past_len, sizeof tv_err_write_past_len);
+    }
+
+    fk_write_max = 0xFFFF;
+    send_vec(tv_body_write_req_rest, sizeof tv_body_write_req_rest);
+    expect_vec(tv_body_write_resp_done, sizeof tv_body_write_resp_done);
+    TEST_ASSERT_EQUAL(TINC_RS_WAIT_HEADERS, tinc_req_state());
+    TEST_ASSERT_EQUAL_STRING("{\"name\":\"calc\",\"n\":84}", fk_sent + hdr_end);
+
+    /* the upload is over: more writes are refused */
+    body_write(22, "");
+    expect_err(TINC_ERR_BAD_STATE);
+}
+
+/* The server answers before the upload finishes: stop sending, read it. */
+static void test_golden_responded_and_hdr_get(void)
+{
+    send_vec(tv_hello_req, sizeof tv_hello_req);
+    post_to_sending();
+    fk_write_max = 8;
+    send_vec(tv_body_write_req, sizeof tv_body_write_req);
+    expect_vec(tv_body_write_resp_partial, sizeof tv_body_write_resp_partial);
+
+    fk_serve("HTTP/1.1 201 Created\r\nLocation: /items/42\r\nContent-Length: 0\r\n\r\n");
+    pump(2);
+    TEST_ASSERT_EQUAL(TINC_RS_BODY, tinc_req_state());
+    TEST_ASSERT_EQUAL(201, tinc_req_http_status());
+    body_write_at(24, 8, 0, "\"calc\",\"n\":84}", 1);
+    expect_vec(tv_body_write_resp_responded, sizeof tv_body_write_resp_responded);
+
+    send_vec(tv_hdr_get_req, sizeof tv_hdr_get_req);
+    expect_vec(tv_hdr_get_resp, sizeof tv_hdr_get_resp);
+}
+
+static void test_golden_bad_header(void)
+{
+    static const char url[] = "https://example.com/api?q=1";
+    static const char h[] = "Host: evil.example\r\n";
+    uint8_t pl[TINC_BEGIN_URL + sizeof url + sizeof h] = {TINC_METHOD_GET};
+
+    send_vec(tv_hello_req, sizeof tv_hello_req);
+    tinc_put_u16(pl + TINC_BEGIN_URL_LEN, sizeof url - 1);
+    tinc_put_u16(pl + TINC_BEGIN_HDR_LEN, sizeof h - 1);
+    memcpy(pl + TINC_BEGIN_URL, url, sizeof url - 1);
+    memcpy(pl + TINC_BEGIN_URL + sizeof url - 1, h, sizeof h - 1);
+    send_final(TINC_T_REQ_BEGIN, 3, pl, (uint16_t)(TINC_BEGIN_URL + sizeof url + sizeof h - 2), 1);
+    expect_vec(tv_err_bad_arg_hdr, sizeof tv_err_bad_arg_hdr);
+    TEST_ASSERT_EQUAL(0, fk_opens);
+}
+
+static void test_golden_hdr_get_truncated(void)
+{
+    char big[200];
+    int i;
+
+    send_vec(tv_hello_req, sizeof tv_hello_req);
+    fetch("http://x/", 0, "HTTP/1.1 200 OK\r\n");
+    memset(big, 'v', sizeof big - 1);
+    big[sizeof big - 1] = 0;
+    for (i = 0; i < 4; i++) { /* ~800 bytes of headers: more than the store holds */
+        fk_serve("X-Big: ");
+        fk_serve(big);
+        fk_serve("\r\n");
+    }
+    fk_serve("Content-Length: 0\r\n\r\n");
+    pump(3);
+    TEST_ASSERT_EQUAL(TINC_RS_BODY, tinc_req_state());
+    hdr_get_at(29, "X-Missing", 0, 0);
+    expect_vec(tv_hdr_get_resp_missing, sizeof tv_hdr_get_resp_missing);
+}
+
+/* ---- methods, uploads and response headers (0.5) ---- */
+
+static void test_begin_methods(void)
+{
+    hello();
+    begin_m(7, 0, "http://x/", "", 0);
+    expect_err(TINC_ERR_BAD_ARG);
+    begin_m(TINC_METHOD_GET, 1, "http://x/", "", 0); /* GET/HEAD carry no body */
+    expect_err(TINC_ERR_BAD_ARG);
+    begin_m(TINC_METHOD_HEAD, 1, "http://x/", "", 0);
+    expect_err(TINC_ERR_BAD_ARG);
+    begin_m(TINC_METHOD_POST, TINC_LEN_UNKNOWN, "http://x/", "", 0); /* chunked upload: reserved */
+    expect_err(TINC_ERR_BAD_ARG);
+    begin("http://x/", "content-length: 1\r\n", 0);
+    expect_err(TINC_ERR_BAD_ARG);
+    begin("http://x/", "X-A: b\r\nTransfer-Encoding: chunked\r\n", 0);
+    expect_err(TINC_ERR_BAD_ARG);
+    begin("http://x/", "X-A: b\nExpect: 100-continue\r\n", 0); /* hidden behind a bare LF */
+    expect_err(TINC_ERR_BAD_ARG);
+    begin("http://x/", "HOST : y\r\n", 0);
+    expect_err(TINC_ERR_BAD_ARG);
+    TEST_ASSERT_EQUAL(0, fk_opens);
+    begin("http://x/", "X-Host: y\r\nHostname: z\r\n", 0); /* only the exact names */
+    expect_ok();
+}
+
+static void test_request_lines(void)
+{
+    hello();
+    begin_m(TINC_METHOD_DELETE, 0, "http://x/i/1", "", 0);
+    expect_ok();
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    TEST_ASSERT_EQUAL(TINC_RS_WAIT_HEADERS, tinc_req_state());
+    assert_prefix("DELETE /i/1 HTTP/1.1\r\n", fk_sent);
+    TEST_ASSERT_NULL(strstr(fk_sent, "Content-Length"));
+    send(TINC_T_REQ_ABORT, NULL, 0);
+
+    /* a POST without a body still says so, and goes straight to the response */
+    begin_m(TINC_METHOD_POST, 0, "http://x", "", 0);
+    expect_ok();
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    TEST_ASSERT_EQUAL(TINC_RS_WAIT_HEADERS, tinc_req_state());
+    assert_prefix("POST / HTTP/1.1\r\n", fk_sent);
+    TEST_ASSERT_NOT_NULL(strstr(fk_sent, "\r\nContent-Length: 0\r\n"));
+    send(TINC_T_REQ_ABORT, NULL, 0);
+
+    begin_m(TINC_METHOD_PUT, 3, "http://x/p?q", "", 0);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    TEST_ASSERT_EQUAL(TINC_RS_SENDING, tinc_req_state());
+    assert_prefix("PUT /p?q HTTP/1.1\r\n", fk_sent);
+    body_write(0, "abc");
+    TEST_ASSERT_EQUAL(TINC_RS_WAIT_HEADERS, tinc_req_state());
+    TEST_ASSERT_EQUAL_STRING("abc", fk_sent + fk_sent_len - 3);
+}
+
+static void test_head(void)
+{
+    uint8_t s;
+
+    hello();
+    begin_m(TINC_METHOD_HEAD, 0, "http://x/old", "", 0);
+    expect_ok();
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    fk_serve("HTTP/1.1 301 Moved\r\nLocation: /f\r\n\r\n");
+    pump(2);
+    TEST_ASSERT_EQUAL(2, fk_opens); /* HEAD follows redirects, like GET */
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    assert_prefix("HEAD /f HTTP/1.1\r\n", fk_sent);
+    fk_serve("HTTP/1.1 200 OK\r\nContent-Length: 1234\r\nContent-Type: text/plain\r\n\r\n");
+    pump(2);
+    TEST_ASSERT_EQUAL(TINC_RS_BODY, tinc_req_state());
+    send(TINC_T_REQ_STATUS, NULL, 0);
+    TEST_ASSERT_EQUAL_UINT32(1234, tinc_get_u32(RPL + TINC_RSTAT_CONTENT_LEN));
+    s = ++seqn;
+    body_read_at(s, 0, 64, 0, 1);
+    expect_ok();
+    TEST_ASSERT_EQUAL(TINC_READ_DATA, RPL_LEN); /* EOF at offset 0, no body */
+    TEST_ASSERT_EQUAL(TINC_READF_EOF, RPL[TINC_READ_FLAGS]);
+}
+
+static void test_post_redirect_not_followed(void)
+{
+    char loc[16];
+
+    hello();
+    begin_m(TINC_METHOD_POST, 2, "http://x/form", "", 0);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    body_write(0, "a=");
+    fk_serve("HTTP/1.1 303 See Other\r\nLocation: /done\r\nContent-Length: 0\r\n\r\n");
+    pump(2);
+    TEST_ASSERT_EQUAL(1, fk_opens);
+    TEST_ASSERT_EQUAL(TINC_RS_BODY, tinc_req_state());
+    TEST_ASSERT_EQUAL(303, tinc_req_http_status());
+    hdr_get("location", 0, 0);
+    expect_ok();
+    TEST_ASSERT_EQUAL_HEX8(TINC_HGETF_FOUND, RPL[TINC_HGET_FLAGS]);
+    memcpy(loc, RPL + TINC_HGET_DATA, RPL_LEN - TINC_HGET_DATA);
+    loc[RPL_LEN - TINC_HGET_DATA] = 0;
+    TEST_ASSERT_EQUAL_STRING("/done", loc);
+}
+
+static void test_hdr_get(void)
+{
+    hello();
+    begin("http://x/", "", 0);
+    hdr_get("Link", 0, 0);
+    expect_err(TINC_ERR_BAD_STATE); /* no response yet */
+    send(TINC_T_REQ_ABORT, NULL, 0);
+
+    /* the headers are those of the final response, after a redirect */
+    fetch("http://x/a", 0, "HTTP/1.1 302 Found\r\nLocation: /b\r\nX-First: 1\r\n\r\n");
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    fk_serve("HTTP/1.1 100 Continue\r\nX-Interim: 1\r\n\r\n"
+             "HTTP/1.1 200 OK\r\nLink: <a>; rel=first\r\nlink: <b>; rel=next\r\n"
+             "X-Long: 0123456789abcdefghij\r\nContent-Length: 0\r\n\r\n");
+    pump(3);
+    TEST_ASSERT_EQUAL(TINC_RS_BODY, tinc_req_state());
+    hdr_get("X-First", 0, 0);
+    TEST_ASSERT_EQUAL_HEX8(0, RPL[TINC_HGET_FLAGS]);
+    hdr_get("x-interim", 0, 0);
+    TEST_ASSERT_EQUAL_HEX8(0, RPL[TINC_HGET_FLAGS]);
+    hdr_get("Location", 0, 0); /* the 302's Location isn't the final response's */
+    TEST_ASSERT_EQUAL_HEX8(0, RPL[TINC_HGET_FLAGS]);
+
+    hdr_get("LINK", 1, 0); /* the second occurrence, any case */
+    expect_ok();
+    TEST_ASSERT_EQUAL_HEX8(TINC_HGETF_FOUND, RPL[TINC_HGET_FLAGS]);
+    TEST_ASSERT_EQUAL_UINT16(13, tinc_get_u16(RPL + TINC_HGET_TOTAL_LEN));
+    TEST_ASSERT_EQUAL_STRING_LEN("<b>; rel=next", RPL + TINC_HGET_DATA, 13);
+    hdr_get("link", 2, 0);
+    TEST_ASSERT_EQUAL_HEX8(0, RPL[TINC_HGET_FLAGS]);
+    TEST_ASSERT_EQUAL_UINT16(0, tinc_get_u16(RPL + TINC_HGET_TOTAL_LEN));
+
+    hdr_get("X-Long", 0, 16); /* paged */
+    expect_ok();
+    TEST_ASSERT_EQUAL_UINT16(20, tinc_get_u16(RPL + TINC_HGET_TOTAL_LEN));
+    TEST_ASSERT_EQUAL(TINC_HGET_DATA + 4, RPL_LEN);
+    TEST_ASSERT_EQUAL_STRING_LEN("ghij", RPL + TINC_HGET_DATA, 4);
+    hdr_get("X-Long", 0, 20);
+    expect_ok();
+    TEST_ASSERT_EQUAL(TINC_HGET_DATA, RPL_LEN);
+    hdr_get("X-Long", 0, 21);
+    expect_err(TINC_ERR_BAD_OFFSET);
+    hdr_get("", 0, 0);
+    expect_err(TINC_ERR_BAD_ARG);
+}
+
+static void test_hdr_get_paged_by_peer_max(void)
+{
+    uint8_t pl[TINC_HELLO_REQ_LEN] = {TINC_PROTO_MAJOR, TINC_PROTO_MINOR, 0, 0, TINC_PAYLOAD_MIN, 0};
+    char v[120];
+
+    send(TINC_T_HELLO, pl, sizeof pl); /* the CE takes 64-byte payloads */
+    memset(v, 'a', sizeof v - 1);
+    v[sizeof v - 1] = 0;
+    fetch("http://x/", 0, "HTTP/1.1 200 OK\r\nX-V: ");
+    fk_serve(v);
+    fk_serve("\r\nContent-Length: 0\r\n\r\n");
+    pump(3);
+    hdr_get("X-V", 0, 0);
+    expect_ok();
+    TEST_ASSERT_EQUAL(TINC_PAYLOAD_MIN, RPL_LEN);
+    TEST_ASSERT_EQUAL_UINT16(sizeof v - 1, tinc_get_u16(RPL + TINC_HGET_TOTAL_LEN));
+}
+
+static void test_hdr_get_error_state(void)
+{
+    hello();
+    begin("http://nosuch.example/", "", 0);
+    fk_tcp = TINC_TCP_ERR_DNS;
+    pump(1);
+    hdr_get("Location", 0, 0);
+    expect_err(TINC_ERR_DNS);
+    body_write(0, "x");
+    expect_err(TINC_ERR_DNS);
+}
+
+static void test_body_write_holds(void)
+{
+    uint8_t s;
+
+    hello();
+    body_write(0, "x");
+    expect_err(TINC_ERR_BAD_STATE); /* no request */
+    begin_m(TINC_METHOD_POST, 4, "http://x/", "", 0);
+
+    /* connecting: a write with a wait holds, then answers with nothing taken */
+    s = ++seqn;
+    TEST_ASSERT_EQUAL_UINT16(TINC_PENDING, body_write_at(s, 0, 50, "abcd", 0));
+    fk_now += 51;
+    body_write_at(s, 0, 50, "abcd", 0);
+    expect_ok();
+    TEST_ASSERT_EQUAL_UINT32(0, tinc_get_u32(RPL + TINC_WRITE_NEXT_OFFSET));
+
+    /* ...and takes the bytes as soon as the connection is up */
+    s = ++seqn;
+    TEST_ASSERT_EQUAL_UINT16(TINC_PENDING, body_write_at(s, 0, 100, "abcd", 0));
+    fk_tcp = TINC_TCP_OPEN;
+    pump(2);
+    body_write_at(s, 0, 100, "abcd", 0);
+    expect_ok();
+    TEST_ASSERT_EQUAL_UINT32(4, tinc_get_u32(RPL + TINC_WRITE_NEXT_OFFSET));
+    TEST_ASSERT_EQUAL(TINC_RS_WAIT_HEADERS, tinc_req_state());
+
+    /* a later BODY_READ hold starts its own clock */
+    fk_serve("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n");
+    pump(2);
+    TEST_ASSERT_EQUAL_UINT16(TINC_PENDING, body_read(0, 64, 50, 0));
+}
+
+static void test_upload_stall_times_out(void)
+{
+    hello();
+    begin_m(TINC_METHOD_POST, 4, "http://x/", "", 5);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    body_write(0, "ab");
+    fk_now += TINC_TIMEOUT_S_DEFAULT * 1000u;
+    pump(1);
+    TEST_ASSERT_EQUAL(TINC_RS_SENDING, tinc_req_state());
+    body_write(2, "c"); /* progress restarts the clock */
+    fk_now += TINC_TIMEOUT_S_DEFAULT * 1000u;
+    pump(1);
+    TEST_ASSERT_EQUAL(TINC_RS_SENDING, tinc_req_state());
+    fk_now += 1;
+    pump(1);
+    TEST_ASSERT_EQUAL(TINC_ERR_TIMEOUT, tinc_req_err());
+}
+
+/* A server that answers early and hangs up: its answer is still read. */
+static void test_responded_then_closed(void)
+{
+    char body[16];
+
+    hello();
+    begin_m(TINC_METHOD_POST, 1000, "http://x/up", "", 0);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    body_write(0, "some");
+    fk_serve("HTTP/1.1 413 Too Large\r\nContent-Length: 3\r\n\r\nbig");
+    fk_tcp = TINC_TCP_CLOSED;
+    pump(3);
+    TEST_ASSERT_EQUAL(TINC_RS_BODY, tinc_req_state());
+    TEST_ASSERT_EQUAL(413, tinc_req_http_status());
+    body_write(4, "more");
+    expect_ok();
+    TEST_ASSERT_EQUAL_HEX8(TINC_WRITEF_RESPONDED, RPL[TINC_WRITE_FLAGS]);
+    TEST_ASSERT_EQUAL_UINT32(4, tinc_get_u32(RPL + TINC_WRITE_NEXT_OFFSET));
+    TEST_ASSERT_EQUAL(3, read_all(body, 16));
+    TEST_ASSERT_EQUAL_STRING("big", body);
+}
+
 /* ---- dispatcher ---- */
 
 static void test_version_mismatch(void)
@@ -394,10 +813,10 @@ static void test_seq_replay_does_not_rerun(void)
 
 static void test_begin_validation(void)
 {
-    uint8_t pl[TINC_BEGIN_URL] = {2};
+    uint8_t pl[TINC_BEGIN_URL] = {7};
 
     hello();
-    send(TINC_T_REQ_BEGIN, pl, sizeof pl); /* method 2 */
+    send(TINC_T_REQ_BEGIN, pl, sizeof pl); /* method 7 */
     expect_err(TINC_ERR_BAD_ARG);
     begin("ftp://x/", "", 0);
     expect_err(TINC_ERR_UNSUPPORTED_SCHEME);
@@ -1233,8 +1652,8 @@ static void test_describe_golden(void)
 {
     int i;
 
-    TEST_ASSERT_EQUAL_STRING("#1 HELLO v0.4 max_payload=256", describe(tv_hello_req, sizeof tv_hello_req));
-    TEST_ASSERT_EQUAL_STRING("#1 HELLO ok v0.4 max_payload=1024 heap=28000 wifi_slots=5",
+    TEST_ASSERT_EQUAL_STRING("#1 HELLO v0.6 max_payload=256", describe(tv_hello_req, sizeof tv_hello_req));
+    TEST_ASSERT_EQUAL_STRING("#1 HELLO ok v0.6 max_payload=1024 heap=28000 wifi_slots=5",
                              describe(tv_hello_resp, sizeof tv_hello_resp));
     TEST_ASSERT_EQUAL_STRING("#2 STATUS wifi=CONNECTED slot=0 rssi=-61 ip=192.168.1.42 heap=27500 req=IDLE wifi-locked",
                              describe(tv_status_resp_locked, sizeof tv_status_resp_locked));
@@ -1252,7 +1671,7 @@ static void test_describe_golden(void)
     TEST_ASSERT_EQUAL_STRING("#10 WIFI_SET slot 1 ssid=\"Phone\" (password not shown) hidden",
                              describe(tv_wifi_set_req, sizeof tv_wifi_set_req));
     TEST_ASSERT_EQUAL_STRING("#12 STATUS -> error NO_HELLO", describe(tv_err_no_hello, sizeof tv_err_no_hello));
-    TEST_ASSERT_EQUAL_STRING("#13 HELLO -> error VERSION (ESP is v0.5)", describe(tv_err_version, sizeof tv_err_version));
+    TEST_ASSERT_EQUAL_STRING("#13 HELLO -> error VERSION (ESP is v0.7)", describe(tv_err_version, sizeof tv_err_version));
     TEST_ASSERT_EQUAL_STRING("#2 STATUS wifi=CONNECTED slot=0 rssi=-61 ip=192.168.1.42 heap=27500 req=IDLE time-ok",
                              describe(tv_status_resp, sizeof tv_status_resp));
     TEST_ASSERT_EQUAL_STRING("#3 REQ_BEGIN GET https://example.com/api?...",
@@ -1266,8 +1685,32 @@ static void test_describe_golden(void)
     TEST_ASSERT_EQUAL_STRING("#17 BODY_READ -> error TIME",
                              describe(tv_err_request_time, sizeof tv_err_request_time));
     TEST_ASSERT_EQUAL_STRING("#16 WIFI_SET -> error LOCKED", describe(tv_err_locked, sizeof tv_err_locked));
-    TEST_ASSERT_EQUAL_STRING("#14 type 0x13 -> error UNSUPPORTED",
+    TEST_ASSERT_EQUAL_STRING("#14 type 0x12 -> error UNSUPPORTED",
                              describe(tv_err_unsupported, sizeof tv_err_unsupported));
+    TEST_ASSERT_EQUAL_STRING("#2 INFO?", describe(tv_info_req, sizeof tv_info_req));
+    TEST_ASSERT_EQUAL_STRING("#2 INFO fw=\"1.2.0\" board=\"Wemos D1 mini\"",
+                             describe(tv_info_resp, sizeof tv_info_resp));
+    TEST_ASSERT_EQUAL_STRING("#3 REQ_BEGIN POST https://example.com/api?... content_len=22 (headers: 32 bytes, not shown)",
+                             describe(tv_req_begin_req_post, sizeof tv_req_begin_req_post));
+    TEST_ASSERT_EQUAL_STRING("#3 REQ_BEGIN DELETE https://example.com/api?...",
+                             describe(tv_req_begin_req_delete, sizeof tv_req_begin_req_delete));
+    TEST_ASSERT_EQUAL_STRING("#3 REQ_BEGIN HEAD https://example.com/api?...",
+                             describe(tv_req_begin_req_head, sizeof tv_req_begin_req_head));
+    TEST_ASSERT_EQUAL_STRING("#21 BODY_WRITE @0 22 bytes wait=100ms",
+                             describe(tv_body_write_req, sizeof tv_body_write_req));
+    TEST_ASSERT_EQUAL_STRING("#21 BODY_WRITE next=8", describe(tv_body_write_resp_partial, sizeof tv_body_write_resp_partial));
+    TEST_ASSERT_EQUAL_STRING("#24 BODY_WRITE next=8 responded",
+                             describe(tv_body_write_resp_responded, sizeof tv_body_write_resp_responded));
+    TEST_ASSERT_EQUAL_STRING("#25 BODY_WRITE -> error BAD_OFFSET",
+                             describe(tv_err_write_bad_offset, sizeof tv_err_write_bad_offset));
+    TEST_ASSERT_EQUAL_STRING("#27 HDR_GET Location", describe(tv_hdr_get_req, sizeof tv_hdr_get_req));
+    TEST_ASSERT_EQUAL_STRING("#27 HDR_GET found, 9 of 9 bytes (not shown)",
+                             describe(tv_hdr_get_resp, sizeof tv_hdr_get_resp));
+    TEST_ASSERT_EQUAL_STRING("#28 HDR_GET link #1 @4", describe(tv_hdr_get_req_paged, sizeof tv_hdr_get_req_paged));
+    TEST_ASSERT_EQUAL_STRING("#28 HDR_GET found, 7 of 200 bytes (not shown)",
+                             describe(tv_hdr_get_resp_paged, sizeof tv_hdr_get_resp_paged));
+    TEST_ASSERT_EQUAL_STRING("#29 HDR_GET not found, headers truncated",
+                             describe(tv_hdr_get_resp_missing, sizeof tv_hdr_get_resp_missing));
 
     /* every valid vector: something sensible, and never a secret */
     for (i = 0; i < TINC_VALID_COUNT; i++) {
@@ -1276,6 +1719,8 @@ static void test_describe_golden(void)
         TEST_ASSERT_NULL_MESSAGE(strstr(s, "hunter22"), tinc_valid_vectors[i].name);
         TEST_ASSERT_NULL_MESSAGE(strstr(s, "Accept"), tinc_valid_vectors[i].name);
         TEST_ASSERT_NULL_MESSAGE(strstr(s, "q=1"), tinc_valid_vectors[i].name);
+        TEST_ASSERT_NULL_MESSAGE(strstr(s, "calc"), tinc_valid_vectors[i].name);   /* request body */
+        TEST_ASSERT_NULL_MESSAGE(strstr(s, "items"), tinc_valid_vectors[i].name);  /* header value */
     }
     /* truncated input never reads past len */
     for (i = 0; i < (int)sizeof tv_req_begin_req; i++)
@@ -1329,6 +1774,21 @@ int main(void)
     RUN_TEST(test_golden_tls_errors);
     RUN_TEST(test_golden_wifi);
     RUN_TEST(test_golden_wifi_lock);
+    RUN_TEST(test_golden_info);
+    RUN_TEST(test_golden_body_write);
+    RUN_TEST(test_golden_responded_and_hdr_get);
+    RUN_TEST(test_golden_bad_header);
+    RUN_TEST(test_golden_hdr_get_truncated);
+    RUN_TEST(test_begin_methods);
+    RUN_TEST(test_request_lines);
+    RUN_TEST(test_head);
+    RUN_TEST(test_post_redirect_not_followed);
+    RUN_TEST(test_hdr_get);
+    RUN_TEST(test_hdr_get_paged_by_peer_max);
+    RUN_TEST(test_hdr_get_error_state);
+    RUN_TEST(test_body_write_holds);
+    RUN_TEST(test_upload_stall_times_out);
+    RUN_TEST(test_responded_then_closed);
     RUN_TEST(test_wifi_set_wflags);
     RUN_TEST(test_wifi_rank_hidden);
     RUN_TEST(test_version_mismatch);

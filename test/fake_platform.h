@@ -112,6 +112,8 @@ uint16_t tinc_plat_tcp_write(const uint8_t *p, uint16_t n)
 {
     if (n > fk_write_max)
         n = fk_write_max;
+    if (n > sizeof fk_sent - 1 - fk_sent_len)
+        n = (uint16_t)(sizeof fk_sent - 1 - fk_sent_len); /* full, like a real send buffer */
     memcpy(fk_sent + fk_sent_len, p, n);
     fk_sent_len = (uint16_t)(fk_sent_len + n);
     fk_sent[fk_sent_len] = 0;
