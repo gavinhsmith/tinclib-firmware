@@ -15,7 +15,7 @@ core so every target gets it for free; a platform layer only adapts one
 target's APIs to the core's interface.
 
 Consumes `tinclib-protocol` as a **git submodule** at
-`external/tinclib-protocol`, pinned to a release tag (currently `v0.3.0`),
+`external/tinclib-protocol`, pinned to a release tag (currently `v0.4.0`),
 and compiled in place by `lib/tinc_core/proto.c`. **Never fork or hand-copy
 `protocol.h`/`crc16.c`/`tinc_frame.c` into this repo.** If the shared
 protocol seems to need a change to support something the firmware needs,
@@ -33,9 +33,15 @@ lib/tinc_core/            target-independent core, C99, no Arduino/SDK/OS calls
   req.c                   request state machine + HTTP response parsing
   describe.c              one-line readable frame descriptions for traces
   transcode.c, wifi_rank.c, proto.c
+lib/tinc_tls/             https for BearSSL targets (ESP8266, PC): TLS over the
+                          platform's plain TCP (tinc_raw_*), CA lookup, error mapping
+certs/cacert.pem          Mozilla's CA roots (curl.se/ca/cacert.pem): the firmware's trust store
+tools/gen_roots.py        pre-build script: cacert.pem -> $BUILD_DIR/roots/tinc_roots.h
 platforms/esp8266/        ESP8266 platform layer (Arduino core)
 platforms/pc/             PC platform layer (Win32 / POSIX), env `pc`
 external/tinclib-protocol pinned protocol submodule
+external/bearssl          BearSSL, the ESP8266 Arduino core's fork, pinned to the
+                          commit that core ships (b024386); built from source for the PC
 test/test_core/           native Unity tests of the core (incl. golden vectors)
 test/fake_platform.h      in-memory implementation of tinc_platform.h for tests/fuzz
 test/fuzz/                libFuzzer target for the dispatcher
@@ -89,8 +95,12 @@ extend `tinc_platform.h` and `test/fake_platform.h` together.
 - The `native` PlatformIO environment builds and tests the core on a PC
   (`pio test -e native`). Keep that possible — see Architecture below.
 - The `pc` environment (PlatformIO `native` platform, the host's gcc/clang)
-  builds `platforms/pc/` with plain Win32/POSIX calls, no extra libraries;
-  `platforms/pc/libs.py` adds the per-OS link libraries.
+  builds `platforms/pc/` with plain Win32/POSIX calls, no extra system
+  libraries; `platforms/pc/libs.py` builds BearSSL from `external/bearssl`
+  and adds the per-OS link libraries. On Windows, three BearSSL files are
+  built with `windows.h` force-included (the fork's `pgmspace.h` defines
+  `PSTR`), and `platforms/pc/compat/alloca.h` stands in for MinGW's missing
+  header. Don't patch the submodule.
 - Pin platform versions in `platformio.ini` (e.g. `espressif8266@4.2.1`) so
   builds are reproducible.
 - On Windows, run `pio` from PowerShell/cmd: MSYS2's gcc fails silently
@@ -151,8 +161,10 @@ make the CE's 200 ms reply timeout fire. Concretely:
 The ESP8266 has ~40-50KB free heap after Wi-Fi; ESP32 has much more, but
 the core is sized for the smallest target and must stay that way.
 - Check free heap before starting a connection or TLS session; fail cleanly
-  (`ERR_NO_MEM` today, `ERR_TLS_NO_MEM` once TLS lands) rather than let the
-  TLS library fail messily or crash/reboot.
+  with `ERR_NO_MEM` rather than let the TLS library fail messily or
+  crash/reboot. The core checks for plain TCP; `tinc_plat_tls_start` checks
+  for its own TLS buffers (~16.7 KB BearSSL receive buffer plus contexts and
+  the stack thunk on the ESP8266).
 - Avoid `String` in hot paths (header parsing, body streaming) — heap
   fragmentation from repeated String churn causes failures that show up
   much later and are hard to trace back. Prefer fixed buffers sized by
@@ -160,34 +172,53 @@ the core is sized for the smallest target and must stay that way.
 - ESP8266: consider Maximum Fragment Length Negotiation (MFLN) to shrink
   BearSSL's TLS buffers (down to ~512B–1KB from the 16KB default) where the
   server supports it — this is often the difference between a TLS session
-  fitting and `ERR_TLS_NO_MEM`. Not all servers support it; this must
-  degrade gracefully, not assume support.
+  fitting and `ERR_NO_MEM`. Not all servers support it; this must
+  degrade gracefully, not assume support. Not done yet: the ESP8266 always
+  allocates the full buffer.
 
 ## TLS / certificate policy — do not change without flagging it
 
-TLS arrives with a later protocol minor version (0.1 is plain HTTP only).
-The policy is chip-independent; the library under it differs per chip
-(BearSSL on ESP8266, mbedTLS on ESP32).
+HTTPS arrived in protocol 0.4 (GET, always verified). The policy is
+chip-independent; the library under it differs per chip (BearSSL on
+ESP8266, mbedTLS on ESP32). The core owns the TLS *phase* (wait for the
+clock, then `tinc_plat_tls_start`, redirect rules, error reporting); the
+platform owns the handshake and maps its library's errors onto the
+protocol's `ERR_TLS` / `ERR_CERT` + `TINC_TLSR_*` reasons.
 
-Default is **CA bundle in flash via LittleFS** with root CA lookup on
-demand (`BearSSL::CertStore` on ESP8266; the equivalent CA-bundle mechanism
-on ESP32) — low RAM cost, works against arbitrary sites. This was chosen
-over per-service pinning (breaks on key rotation) and over
-insecure-by-default (rejected outright). Rules that follow from this:
+The trust store is **Mozilla's CA roots, built into the firmware image**
+(protocol 0.4: "a reflash updates them"). `certs/cacert.pem` is turned into
+a flash-resident (PROGMEM) table by `tools/gen_roots.py` at build time;
+BearSSL looks roots up on demand by the SHA-256 of the issuer DN
+(`br_x509_minimal_set_dynamic`), copying one key into RAM at a time — low
+RAM cost, works against arbitrary sites, and no LittleFS upload that could
+clobber the Wi-Fi slots. This was chosen over per-service pinning (breaks
+on key rotation) and over insecure-by-default (rejected outright). To
+update the roots, replace `certs/cacert.pem` and rebuild. Rules that follow:
 - Insecure mode is a **global TINCLIBC-controlled setting**, off by
   default, and a request's `INSECURE` flag only takes effect if that global
   setting is also on. See `tinclib-protocol`'s `ERR_INSECURE_DISABLED`.
+  Both are reserved, not in 0.4.
 - BearSSL on ESP8266 tops out at **TLS 1.2** — a server requiring TLS 1.3
-  fails; that's expected and should surface as `ERR_TLS_PROTO`, not a
-  crash or a hang. Don't assume ESP32 has the same limit, or that it
+  fails; that's expected and surfaces as `ERR_TLS` / `TINC_TLSR_VERSION`,
+  not a crash or a hang. Don't assume ESP32 has the same limit, or that it
   doesn't — check the mbedTLS build in use.
-- Certificate validation requires correct time. Sync NTP right after
-  joining Wi-Fi; refuse to validate (return `ERR_TLS_TIME`) before time is
-  known good. A `SET_TIME` fallback path (CE pushes its RTC time) was
-  discussed as a fallback — confirm current status before assuming it's
-  implemented.
-- The CA bundle needs a refresh path eventually (likely TINCLIBC-driven).
-  Don't hardcode an unrefreshable bundle as a permanent design.
+- Certificate validation requires correct time. SNTP starts right after
+  joining Wi-Fi; `tinc_plat_time()` returns 0 until the clock is known
+  good, the TLS phase waits for it, and `ERR_TIME` is what the CE sees if
+  it never comes. STATUS reports it as `TIME_VALID`. A `SET_TIME` fallback
+  (CE pushes its RTC time) was discussed but is not in the protocol.
+- CA bundle update over the wire is deferred in the protocol (admin
+  access-control question). Don't hardcode an unrefreshable bundle as a
+  permanent design.
+- The handshake is pumped one record per loop iteration (the ESP8266 runs
+  BearSSL's crypto on the Arduino core's stack thunk, at 160 MHz). A single
+  big-number operation can't be split, so measure reply latency on
+  hardware when touching this.
+- Both BearSSL targets share `lib/tinc_tls`: the ESP8266 links the BearSSL
+  in its Arduino core, the PC builds the same fork from `external/bearssl`,
+  so the PC matches the board on the wire (TLS 1.2 ceiling, same roots, same
+  error mapping). When moving the ESP8266 platform version, move the
+  submodule to the BearSSL commit that core ships (its `bearssl_git.h`).
 
 ## Wi-Fi behavior
 

@@ -10,14 +10,16 @@
 #define LINE_MAX  256                /* response header line */
 #define HOST_MAX  64
 #define STAGE_LEN 128
-/* ponytail: rough floor for lwIP + our buffers on plain TCP; revisit with TLS. */
+/* ponytail: rough floor for lwIP + our buffers on plain TCP. TLS needs far
+ * more; the platform checks that in tinc_plat_tls_start. */
 #define MIN_HEAP  6000u
 
 enum { B_LEN, B_CHUNK_SIZE, B_CHUNK_DATA, B_CHUNK_CRLF, B_TRAILER, B_CLOSE, B_DONE };
 enum { SEGS = 8 };
 
 static struct {
-    uint8_t state, err, flags, redirects, transcode;
+    uint8_t state, err, err_detail, flags, redirects, transcode;
+    uint8_t tls, tls_on; /* url is https; handshake started */
     uint32_t timeout_ms, phase_at;
 
     char rq[RQ_MAX]; /* url, then user headers */
@@ -66,12 +68,18 @@ static void set_state(uint8_t s)
     log_num("req state", s);
 }
 
-static void fail(uint8_t err)
+static void fail_detail(uint8_t err, uint8_t detail)
 {
     tinc_plat_tcp_close();
     r.err = err;
+    r.err_detail = detail;
     set_state(TINC_RS_ERROR);
     log_num("req err", err);
+}
+
+static void fail(uint8_t err)
+{
+    fail_detail(err, 0);
 }
 
 static int lower(int c)
@@ -99,28 +107,49 @@ static int clean(const char *s, uint16_t n)
     return 1;
 }
 
-/* Authority (host[:port]) of an http:// url of length n. */
+/* Length of an "http://" or "https://" prefix, else 0. */
+static uint16_t scheme_len(const char *u, uint16_t n)
+{
+    return iprefix(u, n, "https://") ? 8 : iprefix(u, n, "http://") ? 7 : 0;
+}
+
+/* Starts with some other "scheme://" (RFC 3986 scheme characters). */
+static int other_scheme(const char *u, uint16_t n)
+{
+    uint16_t i = 0;
+    int c;
+
+    for (; i < n; i++) {
+        c = lower((unsigned char)u[i]);
+        if (!(c >= 'a' && c <= 'z') &&
+            !(i && ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.')))
+            break;
+    }
+    return i && iprefix(u + i, (uint16_t)(n - i), "://");
+}
+
+/* Authority (host[:port]) of an http(s):// url of length n. */
 static uint16_t authority(const char *u, uint16_t n)
 {
-    uint16_t i = 7;
+    uint16_t s = scheme_len(u, n), i = s;
 
     while (i < n && u[i] != '/' && u[i] != '?' && u[i] != '#')
         i++;
-    return (uint16_t)(i - 7);
+    return (uint16_t)(i - s);
 }
 
 static uint8_t parse_url(void)
 {
     const char *u = r.rq, *a, *path;
-    uint16_t n = r.url_len, alen, hlen, plen, i;
+    uint16_t n = r.url_len, s = scheme_len(u, n), alen, hlen, plen, i;
     uint32_t port = 0;
 
-    if (iprefix(u, n, "https://"))
-        return TINC_ERR_UNSUPPORTED_SCHEME;
-    if (!iprefix(u, n, "http://") || !clean(u, n))
+    if (!s)
+        return other_scheme(u, n) ? TINC_ERR_UNSUPPORTED_SCHEME : TINC_ERR_BAD_ARG;
+    if (!clean(u, n))
         return TINC_ERR_BAD_ARG;
 
-    a = u + 7;
+    a = u + s;
     alen = authority(u, n);
     for (hlen = 0; hlen < alen && a[hlen] != ':'; hlen++)
         if (a[hlen] == '@')
@@ -137,11 +166,12 @@ static uint8_t parse_url(void)
         if (port == 0)
             return TINC_ERR_BAD_ARG;
     } else {
-        port = 80;
+        port = s == 8 ? 443 : 80;
     }
     memcpy(r.host, a, hlen);
     r.host[hlen] = 0;
     r.port = (uint16_t)port;
+    r.tls = s == 8;
 
     path = a + alen;
     for (plen = 0; path + plen < u + n && path[plen] != '#'; plen++)
@@ -186,6 +216,7 @@ static void start_connect(void)
     r.clen = 0;
     r.ctype[0] = 0;
     r.st_pos = r.st_len = 0;
+    r.tls_on = 0;
     memset(&r.tc, 0, sizeof r.tc);
     if (tinc_plat_tcp_open(r.host, r.port) != 0) {
         fail(TINC_ERR_CONNECT);
@@ -200,6 +231,7 @@ void tinc_req_release(void)
         tinc_plat_tcp_close();
     r.state = TINC_RS_IDLE;
     r.err = TINC_OK;
+    r.err_detail = 0;
     r.status = 0;
     r.ctype[0] = 0;
 }
@@ -236,32 +268,51 @@ uint8_t tinc_req_begin(uint8_t flags, uint8_t timeout_s,
     return TINC_OK;
 }
 
+/* The host of url u (length n) is r.host, ignoring case. */
+static int same_host(const char *u, uint16_t n)
+{
+    uint16_t s = scheme_len(u, n), a = authority(u, n), i;
+
+    for (i = 0; i < a && u[s + i] != ':'; i++)
+        if (!r.host[i] || lower((unsigned char)u[s + i]) != lower((unsigned char)r.host[i]))
+            return 0;
+    return !r.host[i];
+}
+
 /* Rewrite the url from a Location header; 0 on success, else an error. */
 static uint8_t set_location(const char *v, uint16_t n)
 {
-    char tmp[LINE_MAX + 80]; /* location + "http://" + host:port */
-    uint16_t len;
+    char tmp[LINE_MAX + 80]; /* location + "https://" + host:port */
+    uint16_t len, s = scheme_len(v, n), cur = scheme_len(r.rq, r.url_len);
 
-    if (iprefix(v, n, "https://"))
-        return TINC_ERR_UNSUPPORTED_SCHEME;
     if (!clean(v, n))
         return TINC_ERR_HTTP_PROTO;
-    if (iprefix(v, n, "http://")) {
+    if (s) {
+        /* https -> http would resend the app's headers in clear */
+        if (cur == 8 && s == 7)
+            return TINC_ERR_REDIRECT_DOWNGRADE;
         memcpy(tmp, v, n);
         len = n;
     } else if (n >= 2 && v[0] == '/' && v[1] == '/') {
-        memcpy(tmp, "http:", 5);
-        memcpy(tmp + 5, v, n);
-        len = (uint16_t)(n + 5);
-    } else if (n >= 1 && v[0] == '/') {
-        len = (uint16_t)(7 + authority(r.rq, r.url_len));
+        len = (uint16_t)(cur - 2); /* "http:" or "https:" */
         memcpy(tmp, r.rq, len);
         memcpy(tmp + len, v, n);
         len = (uint16_t)(len + n);
+    } else if (n >= 1 && v[0] == '/') {
+        len = (uint16_t)(cur + authority(r.rq, r.url_len));
+        memcpy(tmp, r.rq, len);
+        memcpy(tmp + len, v, n);
+        len = (uint16_t)(len + n);
+    } else if (other_scheme(v, n)) {
+        return TINC_ERR_UNSUPPORTED_SCHEME;
     } else {
         /* ponytail: path-relative Location ("foo/bar") isn't resolved; rare in practice */
         return TINC_ERR_HTTP_PROTO;
     }
+    /* The app never named this host, so none of its headers go there:
+     * credentials can hide under any header name. */
+    if (!same_host(tmp, len))
+        r.hdr_len = 0;
     if ((uint32_t)len + r.hdr_len > RQ_MAX)
         return TINC_ERR_HTTP_PROTO;
     memmove(r.rq + len, r.rq + r.url_len, r.hdr_len);
@@ -497,7 +548,7 @@ void tinc_req_poll(void)
 {
     uint32_t now = tinc_plat_millis();
     tinc_wifi_info w;
-    uint8_t t;
+    uint8_t t, e, d;
     int c;
 
     if (r.state == TINC_RS_IDLE || r.state == TINC_RS_ERROR)
@@ -519,6 +570,15 @@ void tinc_req_poll(void)
         fail(TINC_ERR_DNS);
         return;
     }
+    if (t == TINC_TCP_ERR_TLS) {
+        e = tinc_plat_tls_err(&d);
+        fail_detail(e, d);
+        return;
+    }
+    if (r.state == TINC_RS_TLS && r.tls_on && t != TINC_TCP_TLS && t != TINC_TCP_OPEN) {
+        fail_detail(TINC_ERR_TLS, TINC_TLSR_OTHER); /* server hung up mid-handshake */
+        return;
+    }
     if (t == TINC_TCP_ERR_CONNECT || t == TINC_TCP_IDLE ||
         (t == TINC_TCP_CLOSED && r.state <= TINC_RS_SENDING)) {
         fail(TINC_ERR_CONNECT);
@@ -528,7 +588,19 @@ void tinc_req_poll(void)
     switch (r.state) {
     case TINC_RS_CONNECTING:
         if (t == TINC_TCP_OPEN)
-            set_state(TINC_RS_SENDING);
+            set_state(r.tls ? TINC_RS_TLS : TINC_RS_SENDING);
+        break;
+    case TINC_RS_TLS:
+        if (r.tls_on) {
+            if (t == TINC_TCP_OPEN)
+                set_state(TINC_RS_SENDING);
+        } else if (tinc_plat_time()) { /* certificates can't be checked without a clock */
+            if ((e = tinc_plat_tls_start(r.host)) != TINC_OK) {
+                fail(e);
+                return;
+            }
+            r.tls_on = 1;
+        }
         break;
     case TINC_RS_SENDING:
         send_some();
@@ -574,11 +646,12 @@ void tinc_req_poll(void)
     /* fresh clock: a state change above may have set phase_at after `now` */
     if (r.state >= TINC_RS_CONNECTING && r.state <= TINC_RS_BODY &&
         tinc_plat_millis() - r.phase_at > r.timeout_ms)
-        fail(TINC_ERR_TIMEOUT);
+        fail(r.state == TINC_RS_TLS && !r.tls_on ? TINC_ERR_TIME : TINC_ERR_TIMEOUT);
 }
 
 uint8_t tinc_req_state(void) { return r.state; }
 uint8_t tinc_req_err(void) { return r.err; }
+uint8_t tinc_req_err_detail(void) { return r.err_detail; }
 uint16_t tinc_req_http_status(void) { return r.status; }
 const char *tinc_req_ctype(void) { return r.ctype; }
 

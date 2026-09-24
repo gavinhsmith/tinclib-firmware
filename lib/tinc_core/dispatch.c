@@ -62,6 +62,14 @@ static uint16_t err(uint8_t type, uint8_t seq, uint8_t e)
     return tinc_frame_encode(reply, TINC_FLAG_RESP | TINC_FLAG_ERR, type, seq, PL, 1);
 }
 
+/* A request error, as BODY_READ reports it: err, err_detail. */
+static uint16_t req_err(uint8_t seq)
+{
+    PL[0] = tinc_req_err();
+    PL[1] = tinc_req_err_detail();
+    return tinc_frame_encode(reply, TINC_FLAG_RESP | TINC_FLAG_ERR, TINC_T_BODY_READ, seq, PL, 2);
+}
+
 static uint16_t hello(uint8_t seq, const uint8_t *pl, uint16_t len)
 {
     uint16_t mp;
@@ -104,7 +112,8 @@ static uint16_t status(uint8_t seq)
     memcpy(PL + TINC_STATUS_IP, w.ip, 4);
     tinc_put_u32(PL + TINC_STATUS_FREE_HEAP, tinc_plat_free_heap());
     PL[TINC_STATUS_REQ_STATE] = tinc_req_state();
-    PL[TINC_STATUS_FLAGS] = w.locked ? TINC_STATUSF_WIFI_LOCKED : 0;
+    PL[TINC_STATUS_FLAGS] = (w.locked ? TINC_STATUSF_WIFI_LOCKED : 0) |
+                            (tinc_plat_time() ? TINC_STATUSF_TIME_VALID : 0);
     return ok(TINC_T_STATUS, seq, TINC_STATUS_RESP_LEN);
 }
 
@@ -133,7 +142,7 @@ static uint16_t req_begin(uint8_t seq, const uint8_t *pl, uint16_t len)
 static uint16_t req_status(uint8_t seq)
 {
     const char *ct = tinc_req_ctype();
-    uint16_t n = (uint16_t)strlen(ct), room = (uint16_t)(peer_max - TINC_RSTAT_CTYPE);
+    uint16_t n = (uint16_t)strlen(ct), room = (uint16_t)(peer_max - TINC_RSTAT_CTYPE - 1);
 
     if (n > TINC_CTYPE_MAX)
         n = TINC_CTYPE_MAX;
@@ -145,7 +154,8 @@ static uint16_t req_status(uint8_t seq)
     tinc_put_u32(PL + TINC_RSTAT_CONTENT_LEN, tinc_req_content_len());
     PL[TINC_RSTAT_CTYPE_LEN] = (uint8_t)n;
     memcpy(PL + TINC_RSTAT_CTYPE, ct, n);
-    return ok(TINC_T_REQ_STATUS, seq, (uint16_t)(TINC_RSTAT_CTYPE + n));
+    PL[TINC_RSTAT_CTYPE + n] = tinc_req_err_detail();
+    return ok(TINC_T_REQ_STATUS, seq, (uint16_t)(TINC_RSTAT_CTYPE + n + 1));
 }
 
 static uint16_t body_reply(uint8_t seq, uint32_t off, uint16_t n, int eof)
@@ -166,7 +176,7 @@ static uint16_t body_read(uint8_t seq, const uint8_t *pl, uint16_t len, int fina
     if (len < TINC_READ_REQ_LEN)
         return err(TINC_T_BODY_READ, seq, TINC_ERR_BAD_LEN);
     if (st == TINC_RS_ERROR)
-        return err(TINC_T_BODY_READ, seq, tinc_req_err());
+        return req_err(seq);
     if (st != TINC_RS_BODY && st != TINC_RS_DONE)
         return err(TINC_T_BODY_READ, seq, TINC_ERR_BAD_STATE);
 
@@ -183,7 +193,7 @@ static uint16_t body_read(uint8_t seq, const uint8_t *pl, uint16_t len, int fina
     n = st == TINC_RS_DONE ? 0 : tinc_req_read(chunk, cap, &eof);
     if (tinc_req_state() == TINC_RS_ERROR) {
         waiting = 0;
-        return err(TINC_T_BODY_READ, seq, tinc_req_err());
+        return req_err(seq);
     }
     if (!n && !eof) {
         now = tinc_plat_millis();

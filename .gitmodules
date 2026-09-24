@@ -1,3 +1,6 @@
 [submodule "external/tinclib-protocol"]
 	path = external/tinclib-protocol
 	url = https://github.com/gavinhsmith/tinclib-protocol
+[submodule "external/bearssl"]
+	path = external/bearssl
+	url = https://github.com/earlephilhower/bearssl-esp8266

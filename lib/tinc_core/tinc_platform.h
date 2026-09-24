@@ -27,11 +27,15 @@ enum {
     TINC_TCP_OPEN,
     TINC_TCP_CLOSED,      /* peer closed; buffered bytes are still readable */
     TINC_TCP_ERR_DNS,
-    TINC_TCP_ERR_CONNECT  /* refused, reset or aborted */
+    TINC_TCP_ERR_CONNECT, /* refused, reset or aborted */
+    TINC_TCP_TLS,         /* TLS handshake running (after tinc_plat_tls_start) */
+    TINC_TCP_ERR_TLS      /* handshake failed: see tinc_plat_tls_err */
 };
 
 uint32_t tinc_plat_millis(void);
 uint32_t tinc_plat_free_heap(void);
+/* Unix time in seconds, or 0 until the clock is known good (SNTP). */
+uint32_t tinc_plat_time(void);
 
 /* Link UART to the CE. write takes what fits in the TX buffer right now
  * and returns that count. */
@@ -51,6 +55,16 @@ uint8_t tinc_plat_tcp_state(void);
 uint16_t tinc_plat_tcp_write(const uint8_t *p, uint16_t n);
 uint16_t tinc_plat_tcp_read(uint8_t *p, uint16_t n);
 void tinc_plat_tcp_close(void);
+
+/* TLS on the OPEN connection: verified against the firmware's built-in CA
+ * roots for host, using tinc_plat_time(). Returns TINC_OK once the handshake
+ * has started (tcp_state is then TINC_TCP_TLS until it becomes OPEN or
+ * TINC_TCP_ERR_TLS), or TINC_ERR_NO_MEM. Afterwards tcp read/write carry
+ * plaintext, and tcp_close tears TLS down too. */
+uint8_t tinc_plat_tls_start(const char *host);
+/* After TINC_TCP_ERR_TLS: TINC_ERR_TLS or TINC_ERR_CERT, and *detail the
+ * TINC_TLSR_* reason. */
+uint8_t tinc_plat_tls_err(uint8_t *detail);
 
 /* Debug line. The core never passes request headers here. */
 void tinc_plat_log(const char *msg);

@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-/* Wi-Fi slots this firmware has (protocol 0.3: reported in HELLO). Set per
+/* Wi-Fi slots this firmware has (reported in HELLO). Set per
  * target in platformio.ini: 5 on the ESP boards, 1 on the PC. */
 #ifndef TINC_SLOT_COUNT
 #define TINC_SLOT_COUNT 5
@@ -72,6 +72,7 @@ void tinc_req_release(void);
 void tinc_req_poll(void);
 uint8_t tinc_req_state(void);
 uint8_t tinc_req_err(void);
+uint8_t tinc_req_err_detail(void); /* TINC_TLSR_* for ERR_TLS / ERR_CERT, else 0 */
 uint16_t tinc_req_http_status(void);
 uint32_t tinc_req_content_len(void);
 const char *tinc_req_ctype(void);

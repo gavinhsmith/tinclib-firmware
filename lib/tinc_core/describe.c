@@ -88,8 +88,35 @@ static const char *err_name(uint8_t e)
     case TINC_ERR_HTTP_PROTO:         return "HTTP_PROTO";
     case TINC_ERR_TOO_MANY_REDIRECTS: return "TOO_MANY_REDIRECTS";
     case TINC_ERR_NO_MEM:             return "NO_MEM";
+    case TINC_ERR_TLS:                return "TLS";
+    case TINC_ERR_CERT:               return "CERT";
+    case TINC_ERR_TIME:               return "TIME";
+    case TINC_ERR_REDIRECT_DOWNGRADE: return "REDIRECT_DOWNGRADE";
     }
     return "?";
+}
+
+static const char *tlsr_name(uint8_t d)
+{
+    switch (d) {
+    case TINC_TLSR_VERSION:       return "version";
+    case TINC_TLSR_CIPHER:        return "cipher";
+    case TINC_TLSR_ALERT:         return "alert";
+    case TINC_TLSR_PROTO:         return "proto";
+    case TINC_TLSR_EXPIRED:       return "expired";
+    case TINC_TLSR_NOT_YET_VALID: return "not-yet-valid";
+    case TINC_TLSR_HOSTNAME:      return "hostname";
+    case TINC_TLSR_UNTRUSTED:     return "untrusted";
+    case TINC_TLSR_BAD_CHAIN:     return "bad-chain";
+    }
+    return "other";
+}
+
+/* " (reason)" after ERR_TLS / ERR_CERT */
+static void err_detail(struct out *o, uint8_t e, uint8_t d)
+{
+    if (e == TINC_ERR_TLS || e == TINC_ERR_CERT)
+        put(o, " (%s)", tlsr_name(d));
 }
 
 static const char *const req_states[] = {
@@ -124,6 +151,8 @@ static void status(struct out *o, const uint8_t *p, uint16_t n)
         (unsigned long)tinc_get_u32(p + TINC_STATUS_FREE_HEAP), NAME(req_states, p[TINC_STATUS_REQ_STATE]));
     if (n > TINC_STATUS_FLAGS && (p[TINC_STATUS_FLAGS] & TINC_STATUSF_WIFI_LOCKED))
         put(o, " wifi-locked");
+    if (n > TINC_STATUS_FLAGS && (p[TINC_STATUS_FLAGS] & TINC_STATUSF_TIME_VALID))
+        put(o, " time-ok");
 }
 
 static void req_begin(struct out *o, const uint8_t *p, uint16_t n)
@@ -160,9 +189,12 @@ static void req_status(struct out *o, const uint8_t *p, uint16_t n)
 
     if (n < TINC_RSTAT_CTYPE)
         return;
+    cl = p[TINC_RSTAT_CTYPE_LEN];
     put(o, " %s", NAME(req_states, p[TINC_RSTAT_STATE]));
     if (p[TINC_RSTAT_ERR])
         put(o, " err=%s", err_name(p[TINC_RSTAT_ERR]));
+    if (p[TINC_RSTAT_ERR] && TINC_RSTAT_CTYPE + cl < n)
+        err_detail(o, p[TINC_RSTAT_ERR], p[TINC_RSTAT_CTYPE + cl]);
     if (tinc_get_u16(p + TINC_RSTAT_HTTP_STATUS))
         put(o, " http=%u", tinc_get_u16(p + TINC_RSTAT_HTTP_STATUS));
     clen = tinc_get_u32(p + TINC_RSTAT_CONTENT_LEN);
@@ -170,7 +202,6 @@ static void req_status(struct out *o, const uint8_t *p, uint16_t n)
         put(o, " len=unknown");
     else
         put(o, " len=%lu", (unsigned long)clen);
-    cl = p[TINC_RSTAT_CTYPE_LEN];
     if (cl && TINC_RSTAT_CTYPE + cl <= n)
         put(o, " type=%.*s", (int)cl, (const char *)p + TINC_RSTAT_CTYPE);
 }
@@ -270,6 +301,8 @@ void tinc_describe(const uint8_t *f, uint16_t len, char *buf, size_t cap)
         put(&o, " -> error %s", n ? err_name(p[0]) : "?");
         if (n >= 3 && p[0] == TINC_ERR_VERSION)
             put(&o, " (ESP is v%u.%u)", p[1], p[2]);
+        if (n >= 2)
+            err_detail(&o, p[0], p[1]);
         return;
     }
     if (!name) {

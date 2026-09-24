@@ -19,8 +19,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "tinc_core.h"
+#include "tinc_tls.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -43,7 +45,6 @@ typedef SOCKET sock_t;
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <termios.h>
-#include <time.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -79,6 +80,9 @@ uint32_t tinc_plat_millis(void)
 
 /* The core only uses this for its low-memory floor and in HELLO/STATUS. */
 uint32_t tinc_plat_free_heap(void) { return 1u << 20; }
+
+/* The PC's clock is already synced by the OS. */
+uint32_t tinc_plat_time(void) { return (uint32_t)time(NULL); }
 
 void tinc_plat_log(const char *msg) { say("%s", msg); }
 
@@ -344,7 +348,7 @@ static DWORD WINAPI dns_thread(LPVOID arg) { dns_run(arg); return 0; }
 static void *dns_thread(void *arg) { dns_run(arg); return NULL; }
 #endif
 
-/* ---- TCP ------------------------------------------------------------- */
+/* ---- TCP (lib/tinc_tls adds https on top) ---------------------------- */
 
 static sock_t sk = NO_SOCK;
 static uint8_t tstate = TINC_TCP_IDLE;
@@ -362,7 +366,7 @@ static void set_nonblocking(sock_t s)
 #endif
 }
 
-void tinc_plat_tcp_close(void)
+void tinc_raw_close(void)
 {
     if (job) {
         LOCK();
@@ -382,9 +386,9 @@ void tinc_plat_tcp_close(void)
     tstate = TINC_TCP_IDLE;
 }
 
-int tinc_plat_tcp_open(const char *host, uint16_t port)
+int tinc_raw_open(const char *host, uint16_t port)
 {
-    tinc_plat_tcp_close();
+    tinc_raw_close();
     job = calloc(1, sizeof *job);
     if (!job)
         return -1;
@@ -433,7 +437,10 @@ static void start_connect(struct sockaddr_in *a)
     }
 }
 
-uint8_t tinc_plat_tcp_state(void)
+/* Reads go straight to the socket, so nothing is ever left buffered here. */
+int tinc_raw_pending(void) { return 0; }
+
+uint8_t tinc_raw_state(void)
 {
     if (tstate == TINC_TCP_BUSY && job) {
         int done, ok;
@@ -471,7 +478,7 @@ uint8_t tinc_plat_tcp_state(void)
     return tstate;
 }
 
-uint16_t tinc_plat_tcp_write(const uint8_t *p, uint16_t n)
+uint16_t tinc_raw_write(const uint8_t *p, uint16_t n)
 {
     int w;
 
@@ -487,7 +494,7 @@ uint16_t tinc_plat_tcp_write(const uint8_t *p, uint16_t n)
     return 0;
 }
 
-uint16_t tinc_plat_tcp_read(uint8_t *p, uint16_t n)
+uint16_t tinc_raw_read(uint8_t *p, uint16_t n)
 {
     int r;
 

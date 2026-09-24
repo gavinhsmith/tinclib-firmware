@@ -1,6 +1,7 @@
 /*
  * ESP8266 platform layer: UART, Wi-Fi join, non-blocking TCP over lwIP's
- * raw API, LittleFS slot storage, debug log on Serial1 (GPIO2). Implements
+ * raw API with BearSSL on top for https, SNTP, LittleFS slot storage, debug
+ * log on Serial1 (GPIO2). Implements
  * lib/tinc_core/tinc_platform.h; all protocol logic lives in the core.
  */
 #include <Arduino.h>
@@ -9,8 +10,10 @@
 #include <LittleFS.h>
 #include <lwip/dns.h>
 #include <lwip/tcp.h>
+#include <time.h>
 
 #include "tinc_core.h"
+#include "tinc_tls.h"
 
 #define SLOTS_FILE     "/wifi.bin"
 #define SLOTS_TMP      "/wifi.tmp"
@@ -234,6 +237,7 @@ static void wifi_step(void)
         if (st == WL_CONNECTED) {
             slot_now = cand[ci].slot;
             Serial1.printf("wifi: up on slot %u, rssi %d\n", slot_now, (int)WiFi.RSSI());
+            configTime(0, 0, "pool.ntp.org", "time.nist.gov"); /* certificates need the clock */
             ws = W_UP;
         } else if (st == WL_CONNECT_FAILED || st == WL_WRONG_PASSWORD ||
                    st == WL_NO_SSID_AVAIL || millis() - ws_at > JOIN_TIMEOUT) {
@@ -258,6 +262,8 @@ static void wifi_step(void)
 }
 
 /* ---- TCP over lwIP raw API (DNS + connect never block the loop) ------- */
+
+/* Plain TCP; lib/tinc_tls layers https on top and provides tinc_plat_tcp_*. */
 
 static struct tcp_pcb *pcb;
 static uint8_t tstate = TINC_TCP_IDLE;
@@ -318,7 +324,7 @@ static void t_dns(const char *, const ip_addr_t *ip, void *arg)
         t_connect(ip);
 }
 
-extern "C" void tinc_plat_tcp_close(void)
+extern "C" void tinc_raw_close(void)
 {
     tgen++;
     if (pcb) {
@@ -336,11 +342,11 @@ extern "C" void tinc_plat_tcp_close(void)
     tstate = TINC_TCP_IDLE;
 }
 
-extern "C" int tinc_plat_tcp_open(const char *host, uint16_t port)
+extern "C" int tinc_raw_open(const char *host, uint16_t port)
 {
     err_t e;
 
-    tinc_plat_tcp_close();
+    tinc_raw_close();
     tport = port;
     tstate = TINC_TCP_BUSY;
     e = dns_gethostbyname(host, &taddr, t_dns, (void *)(uintptr_t)tgen);
@@ -351,9 +357,10 @@ extern "C" int tinc_plat_tcp_open(const char *host, uint16_t port)
     return 0;
 }
 
-extern "C" uint8_t tinc_plat_tcp_state(void) { return tstate; }
+extern "C" uint8_t tinc_raw_state(void) { return tstate; }
+extern "C" int tinc_raw_pending(void) { return rxq != nullptr; }
 
-extern "C" uint16_t tinc_plat_tcp_write(const uint8_t *p, uint16_t n)
+extern "C" uint16_t tinc_raw_write(const uint8_t *p, uint16_t n)
 {
     uint16_t room;
 
@@ -368,7 +375,7 @@ extern "C" uint16_t tinc_plat_tcp_write(const uint8_t *p, uint16_t n)
     return n;
 }
 
-extern "C" uint16_t tinc_plat_tcp_read(uint8_t *p, uint16_t n)
+extern "C" uint16_t tinc_raw_read(uint8_t *p, uint16_t n)
 {
     uint16_t got = 0, take;
 
@@ -391,6 +398,17 @@ extern "C" uint16_t tinc_plat_tcp_read(uint8_t *p, uint16_t n)
     if (got && pcb)
         tcp_recved(pcb, got); /* reopen the window only as the CE drains */
     return got;
+}
+
+/* ---- clock (SNTP, started when Wi-Fi comes up) ------------------------ */
+
+#define TIME_VALID_AFTER 1735689600u /* 2025-01-01: anything earlier is an unset clock */
+
+extern "C" uint32_t tinc_plat_time(void)
+{
+    time_t t = time(nullptr);
+
+    return t > (time_t)TIME_VALID_AFTER ? (uint32_t)t : 0;
 }
 
 /* ---- UART link to the CE (framing lives in the core) ----------------- */

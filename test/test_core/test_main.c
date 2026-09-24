@@ -203,17 +203,17 @@ static void test_golden_session(void)
 
 static void test_golden_errors(void)
 {
-    static const char https[] = "https://example.com/";
-    uint8_t pl[TINC_BEGIN_URL + sizeof https] = {TINC_METHOD_GET};
+    static const char ftp[] = "ftp://example.com/";
+    uint8_t pl[TINC_BEGIN_URL + sizeof ftp] = {TINC_METHOD_GET};
     uint8_t rd[TINC_READ_REQ_LEN] = {0};
 
     hello();
     send_final(0x13, 14, NULL, 0, 1);
     expect_vec(tv_err_unsupported, sizeof tv_err_unsupported);
 
-    tinc_put_u16(pl + TINC_BEGIN_URL_LEN, sizeof https - 1);
-    memcpy(pl + TINC_BEGIN_URL, https, sizeof https - 1);
-    send_final(TINC_T_REQ_BEGIN, 16, pl, (uint16_t)(TINC_BEGIN_URL + sizeof https - 1), 1);
+    tinc_put_u16(pl + TINC_BEGIN_URL_LEN, sizeof ftp - 1);
+    memcpy(pl + TINC_BEGIN_URL, ftp, sizeof ftp - 1);
+    send_final(TINC_T_REQ_BEGIN, 16, pl, (uint16_t)(TINC_BEGIN_URL + sizeof ftp - 1), 1);
     expect_vec(tv_err_scheme, sizeof tv_err_scheme);
 
     begin("http://nosuch.example/", "", 0);
@@ -222,6 +222,58 @@ static void test_golden_errors(void)
     pump(1);
     send_final(TINC_T_BODY_READ, 17, rd, sizeof rd, 1);
     expect_vec(tv_err_request_dns, sizeof tv_err_request_dns);
+}
+
+/* https://example.com/api?q=1 up to the TLS phase */
+static void https_to_tls(void)
+{
+    send_vec(tv_req_begin_req_https, sizeof tv_req_begin_req_https);
+    expect_vec(tv_req_begin_resp, sizeof tv_req_begin_resp);
+    TEST_ASSERT_EQUAL_STRING("example.com", fk_host);
+    TEST_ASSERT_EQUAL(443, fk_port);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(1);
+    TEST_ASSERT_EQUAL(TINC_RS_TLS, tinc_req_state());
+}
+
+static void test_golden_tls_errors(void)
+{
+    uint8_t rd[TINC_READ_REQ_LEN] = {0};
+
+    hello();
+    https_to_tls();
+    pump(1);
+    TEST_ASSERT_EQUAL_STRING("example.com", fk_tls_host);
+    fk_tls_err = TINC_ERR_CERT;
+    fk_tls_detail = TINC_TLSR_HOSTNAME;
+    fk_tcp = TINC_TCP_ERR_TLS;
+    pump(1);
+    send_vec(tv_req_status_req, sizeof tv_req_status_req);
+    expect_vec(tv_req_status_resp_cert, sizeof tv_req_status_resp_cert);
+
+    https_to_tls();
+    pump(1);
+    fk_tls_detail = TINC_TLSR_EXPIRED;
+    fk_tcp = TINC_TCP_ERR_TLS;
+    pump(1);
+    send_final(TINC_T_BODY_READ, 17, rd, sizeof rd, 1);
+    expect_vec(tv_err_request_cert, sizeof tv_err_request_cert);
+
+    https_to_tls();
+    pump(1);
+    fk_tls_err = TINC_ERR_TLS;
+    fk_tls_detail = TINC_TLSR_VERSION;
+    fk_tcp = TINC_TCP_ERR_TLS;
+    pump(1);
+    send_final(TINC_T_BODY_READ, 17, rd, sizeof rd, 1);
+    expect_vec(tv_err_request_tls, sizeof tv_err_request_tls);
+
+    fk_time = 0;
+    https_to_tls();
+    fk_now += TINC_TIMEOUT_S_DEFAULT * 1000u + 1;
+    pump(1);
+    send_final(TINC_T_BODY_READ, 17, rd, sizeof rd, 1);
+    expect_vec(tv_err_request_time, sizeof tv_err_request_time);
 }
 
 static void test_golden_wifi(void)
@@ -259,6 +311,7 @@ static void test_golden_wifi_lock(void)
     uint8_t slot = 0;
 
     send_vec(tv_hello_req, sizeof tv_hello_req);
+    fk_time = 0; /* the vector has TIME_VALID clear */
     strcpy(tinc_core_slots()->ssid[0], "Kept");
     fk_wifi.locked = 1;
     fk_heap = 27500;
@@ -347,6 +400,10 @@ static void test_begin_validation(void)
     send(TINC_T_REQ_BEGIN, pl, sizeof pl); /* method 2 */
     expect_err(TINC_ERR_BAD_ARG);
     begin("ftp://x/", "", 0);
+    expect_err(TINC_ERR_UNSUPPORTED_SCHEME);
+    begin("x.example/", "", 0);
+    expect_err(TINC_ERR_BAD_ARG);
+    begin("https://x:0/", "", 0);
     expect_err(TINC_ERR_BAD_ARG);
     begin("http://x y/", "", 0);
     expect_err(TINC_ERR_BAD_ARG);
@@ -510,9 +567,157 @@ static void test_redirects(void)
 static void test_redirect_to_https(void)
 {
     hello();
-    fetch("http://x/", 0, "HTTP/1.1 301 Moved\r\nLocation: https://x/\r\n\r\n");
+    begin("http://x/", "Authorization: k\r\n", 0);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    fk_serve("HTTP/1.1 301 Moved\r\nLocation: https://X/a\r\n\r\n");
+    pump(2);
+    TEST_ASSERT_EQUAL(TINC_RS_CONNECTING, tinc_req_state());
+    TEST_ASSERT_EQUAL(443, fk_port);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(2);
+    TEST_ASSERT_EQUAL(1, fk_tls_starts);
+    fk_tcp = TINC_TCP_OPEN; /* handshake done */
+    pump(3);
+    TEST_ASSERT_EQUAL(TINC_RS_WAIT_HEADERS, tinc_req_state());
+    /* same host, case aside: the app's headers still go */
+    assert_prefix("GET /a HTTP/1.1\r\nHost: X\r\n", fk_sent);
+    TEST_ASSERT_NOT_NULL(strstr(fk_sent, "\r\nAuthorization: k\r\n\r\n"));
+
+    /* a scheme-relative Location stays on https */
+    fk_serve("HTTP/1.1 302 Found\r\nLocation: //x/b\r\n\r\n");
+    pump(2);
+    TEST_ASSERT_EQUAL(TINC_RS_CONNECTING, tinc_req_state());
+    TEST_ASSERT_EQUAL(443, fk_port);
+}
+
+static void test_redirect_downgrade(void)
+{
+    hello();
+    begin("https://x/", "", 0);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(2);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    fk_serve("HTTP/1.1 301 Moved\r\nLocation: http://x/\r\n\r\n");
+    pump(2);
     TEST_ASSERT_EQUAL(TINC_RS_ERROR, tinc_req_state());
-    TEST_ASSERT_EQUAL(TINC_ERR_UNSUPPORTED_SCHEME, tinc_req_err());
+    TEST_ASSERT_EQUAL(TINC_ERR_REDIRECT_DOWNGRADE, tinc_req_err());
+    TEST_ASSERT_EQUAL(1, fk_opens);
+}
+
+static void test_redirect_other_host_drops_headers(void)
+{
+    hello();
+    begin("http://x/", "X-Key: s3cret\r\n", 0);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    TEST_ASSERT_NOT_NULL(strstr(fk_sent, "s3cret"));
+    fk_serve("HTTP/1.1 302 Found\r\nLocation: http://xx/z\r\n\r\n");
+    pump(2);
+    TEST_ASSERT_EQUAL_STRING("xx", fk_host);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    TEST_ASSERT_EQUAL(TINC_RS_WAIT_HEADERS, tinc_req_state());
+    assert_prefix("GET /z HTTP/1.1\r\nHost: xx\r\n", fk_sent);
+    TEST_ASSERT_NULL(strstr(fk_sent, "s3cret"));
+    /* and they stay dropped, even back on the original host */
+    fk_serve("HTTP/1.1 302 Found\r\nLocation: http://x/\r\n\r\n");
+    pump(2);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    TEST_ASSERT_EQUAL(TINC_RS_WAIT_HEADERS, tinc_req_state());
+    TEST_ASSERT_NULL(strstr(fk_sent, "s3cret"));
+}
+
+static void test_https_fetch(void)
+{
+    char body[64];
+
+    hello();
+    begin("https://x/p", "", 0);
+    expect_ok();
+    TEST_ASSERT_EQUAL(443, fk_port);
+    pump(1);
+    TEST_ASSERT_EQUAL(TINC_RS_CONNECTING, tinc_req_state());
+    fk_tcp = TINC_TCP_OPEN;
+    pump(1);
+    TEST_ASSERT_EQUAL(TINC_RS_TLS, tinc_req_state());
+    TEST_ASSERT_EQUAL(0, fk_tls_starts);
+    pump(1);
+    TEST_ASSERT_EQUAL(1, fk_tls_starts);
+    TEST_ASSERT_EQUAL_STRING("x", fk_tls_host);
+    pump(3); /* handshaking */
+    TEST_ASSERT_EQUAL(TINC_RS_TLS, tinc_req_state());
+    TEST_ASSERT_EQUAL(0, fk_sent_len);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(3);
+    TEST_ASSERT_EQUAL(TINC_RS_WAIT_HEADERS, tinc_req_state());
+    assert_prefix("GET /p HTTP/1.1\r\nHost: x\r\n", fk_sent);
+    fk_serve("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    pump(2);
+    TEST_ASSERT_EQUAL(2, read_all(body, 64));
+    TEST_ASSERT_EQUAL_STRING("ok", body);
+}
+
+static void test_tls_waits_for_clock(void)
+{
+    hello();
+    fk_time = 0;
+    begin("https://x:8443/", "", 0);
+    TEST_ASSERT_EQUAL(8443, fk_port);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(5);
+    TEST_ASSERT_EQUAL(TINC_RS_TLS, tinc_req_state());
+    TEST_ASSERT_EQUAL(0, fk_tls_starts);
+    send(TINC_T_STATUS, NULL, 0);
+    TEST_ASSERT_EQUAL_HEX8(0, RPL[TINC_STATUS_FLAGS] & TINC_STATUSF_TIME_VALID);
+    fk_time = 1760000000u; /* SNTP answered */
+    send(TINC_T_STATUS, NULL, 0);
+    TEST_ASSERT_EQUAL_HEX8(TINC_STATUSF_TIME_VALID, RPL[TINC_STATUS_FLAGS] & TINC_STATUSF_TIME_VALID);
+    pump(1);
+    TEST_ASSERT_EQUAL(1, fk_tls_starts);
+    /* a stalled handshake is a plain timeout, not ERR_TIME */
+    fk_now += TINC_TIMEOUT_S_DEFAULT * 1000u + 1;
+    pump(1);
+    TEST_ASSERT_EQUAL(TINC_ERR_TIMEOUT, tinc_req_err());
+    TEST_ASSERT_EQUAL(0, tinc_req_err_detail());
+}
+
+static void test_tls_no_mem(void)
+{
+    hello();
+    fk_tls_ret = TINC_ERR_NO_MEM;
+    begin("https://x/", "", 0);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(2);
+    TEST_ASSERT_EQUAL(TINC_RS_ERROR, tinc_req_state());
+    TEST_ASSERT_EQUAL(TINC_ERR_NO_MEM, tinc_req_err());
+    TEST_ASSERT_EQUAL(TINC_TCP_IDLE, fk_tcp);
+}
+
+static void test_tls_hangup(void)
+{
+    hello();
+    begin("https://x/", "", 0);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(2);
+    fk_tcp = TINC_TCP_CLOSED;
+    pump(1);
+    TEST_ASSERT_EQUAL(TINC_ERR_TLS, tinc_req_err());
+    TEST_ASSERT_EQUAL(TINC_TLSR_OTHER, tinc_req_err_detail());
+
+    /* a new request clears the detail */
+    begin("https://x/", "", 0);
+    fk_tcp = TINC_TCP_OPEN;
+    pump(2);
+    fk_tls_err = TINC_ERR_CERT;
+    fk_tls_detail = TINC_TLSR_UNTRUSTED;
+    fk_tcp = TINC_TCP_ERR_TLS;
+    pump(1);
+    TEST_ASSERT_EQUAL(TINC_TLSR_UNTRUSTED, tinc_req_err_detail());
+    begin("http://x/", "", 0);
+    TEST_ASSERT_EQUAL(0, tinc_req_err_detail());
 }
 
 static void test_redirect_limit(void)
@@ -1028,8 +1233,8 @@ static void test_describe_golden(void)
 {
     int i;
 
-    TEST_ASSERT_EQUAL_STRING("#1 HELLO v0.3 max_payload=256", describe(tv_hello_req, sizeof tv_hello_req));
-    TEST_ASSERT_EQUAL_STRING("#1 HELLO ok v0.3 max_payload=1024 heap=28000 wifi_slots=5",
+    TEST_ASSERT_EQUAL_STRING("#1 HELLO v0.4 max_payload=256", describe(tv_hello_req, sizeof tv_hello_req));
+    TEST_ASSERT_EQUAL_STRING("#1 HELLO ok v0.4 max_payload=1024 heap=28000 wifi_slots=5",
                              describe(tv_hello_resp, sizeof tv_hello_resp));
     TEST_ASSERT_EQUAL_STRING("#2 STATUS wifi=CONNECTED slot=0 rssi=-61 ip=192.168.1.42 heap=27500 req=IDLE wifi-locked",
                              describe(tv_status_resp_locked, sizeof tv_status_resp_locked));
@@ -1047,7 +1252,19 @@ static void test_describe_golden(void)
     TEST_ASSERT_EQUAL_STRING("#10 WIFI_SET slot 1 ssid=\"Phone\" (password not shown) hidden",
                              describe(tv_wifi_set_req, sizeof tv_wifi_set_req));
     TEST_ASSERT_EQUAL_STRING("#12 STATUS -> error NO_HELLO", describe(tv_err_no_hello, sizeof tv_err_no_hello));
-    TEST_ASSERT_EQUAL_STRING("#13 HELLO -> error VERSION (ESP is v0.4)", describe(tv_err_version, sizeof tv_err_version));
+    TEST_ASSERT_EQUAL_STRING("#13 HELLO -> error VERSION (ESP is v0.5)", describe(tv_err_version, sizeof tv_err_version));
+    TEST_ASSERT_EQUAL_STRING("#2 STATUS wifi=CONNECTED slot=0 rssi=-61 ip=192.168.1.42 heap=27500 req=IDLE time-ok",
+                             describe(tv_status_resp, sizeof tv_status_resp));
+    TEST_ASSERT_EQUAL_STRING("#3 REQ_BEGIN GET https://example.com/api?...",
+                             describe(tv_req_begin_req_https, sizeof tv_req_begin_req_https));
+    TEST_ASSERT_EQUAL_STRING("#4 REQ_STATUS ERROR err=CERT (hostname) len=unknown",
+                             describe(tv_req_status_resp_cert, sizeof tv_req_status_resp_cert));
+    TEST_ASSERT_EQUAL_STRING("#17 BODY_READ -> error CERT (expired)",
+                             describe(tv_err_request_cert, sizeof tv_err_request_cert));
+    TEST_ASSERT_EQUAL_STRING("#17 BODY_READ -> error TLS (version)",
+                             describe(tv_err_request_tls, sizeof tv_err_request_tls));
+    TEST_ASSERT_EQUAL_STRING("#17 BODY_READ -> error TIME",
+                             describe(tv_err_request_time, sizeof tv_err_request_time));
     TEST_ASSERT_EQUAL_STRING("#16 WIFI_SET -> error LOCKED", describe(tv_err_locked, sizeof tv_err_locked));
     TEST_ASSERT_EQUAL_STRING("#14 type 0x13 -> error UNSUPPORTED",
                              describe(tv_err_unsupported, sizeof tv_err_unsupported));
@@ -1109,6 +1326,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_golden_session);
     RUN_TEST(test_golden_errors);
+    RUN_TEST(test_golden_tls_errors);
     RUN_TEST(test_golden_wifi);
     RUN_TEST(test_golden_wifi_lock);
     RUN_TEST(test_wifi_set_wflags);
@@ -1129,6 +1347,12 @@ int main(void)
     RUN_TEST(test_close_before_headers);
     RUN_TEST(test_redirects);
     RUN_TEST(test_redirect_to_https);
+    RUN_TEST(test_redirect_downgrade);
+    RUN_TEST(test_redirect_other_host_drops_headers);
+    RUN_TEST(test_https_fetch);
+    RUN_TEST(test_tls_waits_for_clock);
+    RUN_TEST(test_tls_no_mem);
+    RUN_TEST(test_tls_hangup);
     RUN_TEST(test_redirect_limit);
     RUN_TEST(test_no_content);
     RUN_TEST(test_body_read_offsets);

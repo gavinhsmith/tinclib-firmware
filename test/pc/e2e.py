@@ -165,7 +165,7 @@ def main():
     trace.seek(0)
     log = trace.read()
     print(log[:2000])
-    for want in ("calc > #1 STATUS?", "calc < #1 STATUS -> error NO_HELLO", "HELLO ok v0.3",
+    for want in ("calc > #1 STATUS?", "calc < #1 STATUS -> error NO_HELLO", "HELLO ok v0.4",
                  "REQ_BEGIN GET http://127.0.0.1:", "/data?...", "REQ_STATUS BODY http=200",
                  "BODY_READ @0 max=200 wait=50ms", "bytes EOF", "WIFI_SET -> error LOCKED",
                  'WIFI_GET ssid="LAN"', "wifi_slots=1"):

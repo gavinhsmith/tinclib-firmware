@@ -16,6 +16,11 @@ static uint8_t fk_tcp;
 static char fk_host[64];
 static uint16_t fk_port;
 static int fk_opens;
+static uint32_t fk_time;                   /* 0 = clock not set */
+static uint8_t fk_tls_ret;                 /* what tls_start returns */
+static uint8_t fk_tls_err, fk_tls_detail;  /* reported after TINC_TCP_ERR_TLS */
+static int fk_tls_starts;
+static char fk_tls_host[64];
 static char fk_sent[4096];
 static uint16_t fk_sent_len, fk_write_max;
 static uint8_t fk_rx[8192];
@@ -35,6 +40,12 @@ static void fk_reset(void)
     fk_tcp = TINC_TCP_IDLE;
     fk_host[0] = 0;
     fk_opens = 0;
+    fk_time = 1760000000u;
+    fk_tls_ret = TINC_OK;
+    fk_tls_err = TINC_ERR_TLS;
+    fk_tls_detail = TINC_TLSR_OTHER;
+    fk_tls_starts = 0;
+    fk_tls_host[0] = 0;
     fk_sent_len = 0;
     fk_write_max = 0xFFFF;
     fk_rx_len = fk_rx_pos = 0;
@@ -73,6 +84,7 @@ static void fk_serve(const char *s)
 
 uint32_t tinc_plat_millis(void) { return fk_tick ? fk_now++ : fk_now; }
 uint32_t tinc_plat_free_heap(void) { return fk_heap; }
+uint32_t tinc_plat_time(void) { return fk_time; }
 void tinc_plat_wifi_info(tinc_wifi_info *out) { *out = fk_wifi; }
 void tinc_plat_wifi_reconnect(void) { fk_reconnects++; }
 
@@ -119,6 +131,21 @@ uint16_t tinc_plat_tcp_read(uint8_t *p, uint16_t n)
 }
 
 void tinc_plat_tcp_close(void) { fk_tcp = TINC_TCP_IDLE; }
+
+uint8_t tinc_plat_tls_start(const char *host)
+{
+    strncpy(fk_tls_host, host, sizeof fk_tls_host - 1);
+    fk_tls_starts++;
+    if (fk_tls_ret == TINC_OK)
+        fk_tcp = TINC_TCP_TLS;
+    return fk_tls_ret;
+}
+
+uint8_t tinc_plat_tls_err(uint8_t *detail)
+{
+    *detail = fk_tls_detail;
+    return fk_tls_err;
+}
 
 void tinc_plat_log(const char *msg)
 {

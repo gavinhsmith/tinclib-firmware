@@ -28,6 +28,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (size < 2)
         return 0;
     fk_reset();
+    if (data[0] & 0x80)
+        fk_time = 0; /* clock never set: https waits, then ERR_TIME */
+    fk_tls_err = data[0] & 0x40 ? TINC_ERR_CERT : TINC_ERR_TLS;
+    fk_tls_detail = data[1];
     tinc_core_init();
     tinc_dispatch(TINC_T_HELLO, 0, hello, sizeof hello, 1, &rep);
 
@@ -41,9 +45,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             (n < TINC_OVERHEAD || n > TINC_FRAME_BUF(TINC_PAYLOAD_LIMIT) ||
              (uint16_t)(tinc_get_u16(rep + 4) + TINC_OVERHEAD) != n))
             __builtin_trap();
-        /* once a request is out, let the "server" answer */
+        /* once a request is out, let the "server" answer (and the TLS
+         * handshake finish or fail) */
+        if (fk_tcp == TINC_TCP_TLS)
+            fk_tcp = (uint8_t)((data[0] >> 4) % 8);
         if (fk_tcp == TINC_TCP_BUSY) {
-            fk_tcp = data[0] % 6;
+            fk_tcp = data[0] % 8;
             memcpy(fk_rx, data + 2, srv);
             fk_rx_len = (uint16_t)srv;
         }
