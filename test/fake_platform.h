@@ -36,6 +36,7 @@ static void fk_reset(void)
     fk_heap = 28000;
     memset(&fk_wifi, 0, sizeof fk_wifi);
     fk_wifi.state = TINC_WIFI_CONNECTED;
+    memcpy(fk_wifi.mac, "\x5C\xCF\x7F\x12\x34\x56", 6); /* the golden INFO vector's */
     fk_reconnects = fk_saves = fk_save_fail = 0;
     fk_tcp = TINC_TCP_IDLE;
     fk_host[0] = 0;

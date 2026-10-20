@@ -19,6 +19,7 @@ typedef struct {
     int8_t rssi;
     uint8_t ip[4];
     uint8_t locked;  /* Wi-Fi profiles locked (build flag or switch); never set over the wire */
+    uint8_t mac[6];  /* station MAC, TINC_MAC_LEN, in transmission order */
 } tinc_wifi_info;
 
 enum {

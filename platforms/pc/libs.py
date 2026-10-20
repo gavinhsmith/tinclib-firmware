@@ -23,7 +23,7 @@ if sys.platform == "win32":
     libs.append(w.StaticLibrary(os.path.join("$BUILD_DIR", "bearssl_win"), [
         w.Object(os.path.join("$BUILD_DIR", "bearssl_win", f.replace("/", "_") + ".o"),
                  os.path.join(src, f)) for f in win]))
-    libs += ["ws2_32", "advapi32"]
+    libs += ["ws2_32", "advapi32", "iphlpapi"]
 else:
     libs.append(bearssl.BuildLibrary(os.path.join("$BUILD_DIR", "bearssl"), src))
     libs.append("pthread")

@@ -41,7 +41,7 @@ TI-84 Plus CE ──USB──> ESP8266 board ──Wi-Fi──> the internet
   (tinclib)            (this firmware)
 ```
 
-This release speaks tinclib-protocol **v0.6**. See tinclib's README for which
+This release speaks tinclib-protocol **v0.7**. See tinclib's README for which
 boards the calculator's USB driver supports.
 
 ## Quick start
@@ -50,8 +50,8 @@ Download a build from [Releases](https://github.com/gavinhsmith/tinclib-firmware
 
 | Target | File | Status |
 |---|---|---|
-| ESP8266 | `tinclib-firmware-esp8266.bin` | protocol 0.6, 5 Wi-Fi slots |
-| PC: Windows, Linux, macOS | `tinclib-pc-*` | protocol 0.6, uses the PC's network |
+| ESP8266 | `tinclib-firmware-esp8266.bin` | protocol 0.7, 5 Wi-Fi slots |
+| PC: Windows, Linux, macOS | `tinclib-pc-*` | protocol 0.7, uses the PC's network |
 | ESP32 | | planned |
 
 Flash the ESP8266 build:
@@ -93,13 +93,14 @@ The app waits for the port to appear and reopens it if the calculator is unplugg
 sees like a board reset. The PC can't join another network, so it reports itself as connected, has a
 single Wi-Fi slot named "LAN", and keeps it locked (the protocol's Wi-Fi lock): `WIFI_SET` and
 `WIFI_FORGET` get `ERR_LOCKED`, and every request goes out through the PC's own networking stack.
+`INFO` reports the PC's own MAC: that of the network adapter it reaches the internet through (the physical one under a VPN), or all zero when offline.
 
 Every packet is printed to stdout as it passes, one readable line each (`>` from the calculator, `<` the
 reply); log lines (request states and errors) go to stderr:
 
 ```
-     3.102  calc > #2 HELLO v0.6 max_payload=256
-     3.103  calc < #2 HELLO ok v0.6 max_payload=1024 heap=1048576 wifi_slots=1
+     3.102  calc > #2 HELLO v0.7 max_payload=256
+     3.103  calc < #2 HELLO ok v0.7 max_payload=1024 heap=1048576 wifi_slots=1
      3.210  calc > #5 REQ_BEGIN GET http://api.example.com/v1/items?... (headers: 31 bytes, not shown)
      3.498  calc < #7 REQ_STATUS BODY http=200 len=812 type=application/json
      3.520  calc < #8 BODY_READ @0 200 bytes: "{\"items\":[{\"id\":1,\"name\":\"first\"},{\"id\":2,\"n"...
@@ -170,12 +171,14 @@ interface doesn't offer, extend `tinc_platform.h` and the fake together.
 - 5 Wi-Fi slots (`-D TINC_SLOT_COUNT=5` in `platformio.ini`; the core reports it in `HELLO`).
 - Profiles saved by the older 3-slot firmware (protocol 0.1/0.2) move into slots 0-2 on the first boot
   after an upgrade.
+- `INFO` reports the Wi-Fi station MAC, for registering the board on a
+  MAC-filtered network.
 - The debug log goes to Serial1 (GPIO2, TX only). The reset reason is logged
   at boot.
 - The ESP8266 SDK doesn't report WPA2-Enterprise in scan results, so those
   networks can't be flagged as unsupported. Joining them simply fails.
 
-## Known protocol gaps (0.6)
+## Known protocol gaps (0.7)
 
 - The `WIFI_SET` comment in `protocol.h` says the ESP joins "the first
   reachable slot, 0 → wifi_slots-1". This firmware ranks candidates by RSSI instead, as

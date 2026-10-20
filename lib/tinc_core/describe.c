@@ -250,6 +250,8 @@ static void info(struct out *o, const uint8_t *p, uint16_t n)
 
     put_lp(o, "fw", p, n, &i);
     put_lp(o, "board", p, n, &i);
+    if (i + TINC_MAC_LEN <= n)
+        put(o, " mac=%02X:%02X:%02X:%02X:%02X:%02X", p[i], p[i + 1], p[i + 2], p[i + 3], p[i + 4], p[i + 5]);
 }
 
 /* The body itself is never shown: it may be a login form. */
