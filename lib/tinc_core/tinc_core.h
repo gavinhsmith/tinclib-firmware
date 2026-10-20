@@ -32,7 +32,7 @@ struct tinc_slots {
 /* INFO reply, display only. The version follows the release tag; the board
  * name is set per env in platformio.ini. Each at most TINC_INFO_STR_MAX. */
 #ifndef TINC_FW_VERSION
-#define TINC_FW_VERSION "0.6.0"
+#define TINC_FW_VERSION "0.7.0"
 #endif
 #ifndef TINC_BOARD_NAME
 #define TINC_BOARD_NAME "unknown"

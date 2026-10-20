@@ -336,6 +336,12 @@ static void test_golden_wifi(void)
     expect_vec(tv_wifi_set_resp, sizeof tv_wifi_set_resp);
     TEST_ASSERT_EQUAL_STRING("hunter22", tinc_core_slots()->pass[1]);
     TEST_ASSERT_EQUAL(TINC_WF_HIDDEN, tinc_core_slots()->wflags[1]);
+    /* 0.7: pass_len 0 is an open network (seq 10 again, so clear the cache) */
+    hello();
+    send_vec(tv_wifi_set_open_req, sizeof tv_wifi_set_open_req);
+    expect_vec(tv_wifi_set_resp, sizeof tv_wifi_set_resp);
+    TEST_ASSERT_EQUAL_STRING("CoffeeShop", tinc_core_slots()->ssid[2]);
+    TEST_ASSERT_EQUAL_STRING("", tinc_core_slots()->pass[2]);
     send_vec(tv_wifi_forget_req, sizeof tv_wifi_forget_req);
     expect_vec(tv_wifi_forget_resp, sizeof tv_wifi_forget_resp);
     TEST_ASSERT_EQUAL_STRING("", tinc_core_slots()->ssid[1]);
@@ -1652,8 +1658,8 @@ static void test_describe_golden(void)
 {
     int i;
 
-    TEST_ASSERT_EQUAL_STRING("#1 HELLO v0.6 max_payload=256", describe(tv_hello_req, sizeof tv_hello_req));
-    TEST_ASSERT_EQUAL_STRING("#1 HELLO ok v0.6 max_payload=1024 heap=28000 wifi_slots=5",
+    TEST_ASSERT_EQUAL_STRING("#1 HELLO v0.7 max_payload=256", describe(tv_hello_req, sizeof tv_hello_req));
+    TEST_ASSERT_EQUAL_STRING("#1 HELLO ok v0.7 max_payload=1024 heap=28000 wifi_slots=5",
                              describe(tv_hello_resp, sizeof tv_hello_resp));
     TEST_ASSERT_EQUAL_STRING("#2 STATUS wifi=CONNECTED slot=0 rssi=-61 ip=192.168.1.42 heap=27500 req=IDLE wifi-locked",
                              describe(tv_status_resp_locked, sizeof tv_status_resp_locked));
@@ -1688,7 +1694,7 @@ static void test_describe_golden(void)
     TEST_ASSERT_EQUAL_STRING("#14 type 0x12 -> error UNSUPPORTED",
                              describe(tv_err_unsupported, sizeof tv_err_unsupported));
     TEST_ASSERT_EQUAL_STRING("#2 INFO?", describe(tv_info_req, sizeof tv_info_req));
-    TEST_ASSERT_EQUAL_STRING("#2 INFO fw=\"1.2.0\" board=\"Wemos D1 mini\"",
+    TEST_ASSERT_EQUAL_STRING("#2 INFO fw=\"1.2.0\" board=\"Wemos D1 mini\" mac=5C:CF:7F:12:34:56",
                              describe(tv_info_resp, sizeof tv_info_resp));
     TEST_ASSERT_EQUAL_STRING("#3 REQ_BEGIN POST https://example.com/api?... content_len=22 (headers: 32 bytes, not shown)",
                              describe(tv_req_begin_req_post, sizeof tv_req_begin_req_post));

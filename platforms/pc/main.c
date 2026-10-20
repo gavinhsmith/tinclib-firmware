@@ -36,6 +36,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <iphlpapi.h>
 typedef SOCKET sock_t;
 #define NO_SOCK INVALID_SOCKET
 #define sock_close closesocket
@@ -45,6 +46,8 @@ typedef SOCKET sock_t;
 #else
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <pthread.h>
 #include <signal.h>
@@ -55,6 +58,11 @@ typedef SOCKET sock_t;
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#ifdef __APPLE__
+#include <net/if_dl.h>
+#else
+#include <netpacket/packet.h>
+#endif
 typedef int sock_t;
 #define NO_SOCK (-1)
 #define sock_close close
@@ -582,6 +590,81 @@ static void local_ip(uint8_t ip[4])
     sock_close(s);
 }
 
+/* The MAC the network sees: that of the interface that has ip, or, when
+ * that one has none (a VPN tunnel), of the physical adapter under it. All
+ * zero if there is none (e.g. offline).
+ * ponytail: "the physical adapter" is the first that's up with a MAC (and,
+ * on Windows, a gateway); pick by default route if a PC has several. */
+static void local_mac(const uint8_t ip[4], uint8_t mac[6])
+{
+#ifdef _WIN32
+    static ULONGLONG buf[4096]; /* 32 KB, aligned for IP_ADAPTER_ADDRESSES */
+    ULONG len = sizeof buf;
+    IP_ADAPTER_ADDRESSES *a;
+    IP_ADAPTER_UNICAST_ADDRESS *u;
+    int found = 0;
+
+    memset(mac, 0, 6);
+    if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST |
+                             GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                             NULL, (IP_ADAPTER_ADDRESSES *)buf, &len) != NO_ERROR)
+        return;
+    for (a = (IP_ADAPTER_ADDRESSES *)buf; a; a = a->Next) {
+        if (a->PhysicalAddressLength != 6 || a->OperStatus != IfOperStatusUp)
+            continue;
+        for (u = a->FirstUnicastAddress; u; u = u->Next)
+            if (memcmp(&((struct sockaddr_in *)u->Address.lpSockaddr)->sin_addr, ip, 4) == 0) {
+                memcpy(mac, a->PhysicalAddress, 6);
+                return;
+            }
+        if (!found && a->FirstGatewayAddress &&
+            (a->IfType == IF_TYPE_ETHERNET_CSMACD || a->IfType == IF_TYPE_IEEE80211)) {
+            memcpy(mac, a->PhysicalAddress, 6);
+            found = 1;
+        }
+    }
+#else
+    struct ifaddrs *all, *i, *j;
+    int found = 0;
+
+    memset(mac, 0, 6);
+    if (getifaddrs(&all))
+        return;
+    for (i = all; i; i = i->ifa_next) {
+        int mine, has_mac = 0;
+        uint8_t m[6];
+
+        if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || (i->ifa_flags & IFF_LOOPBACK) ||
+            !(i->ifa_flags & IFF_RUNNING))
+            continue;
+        mine = memcmp(&((struct sockaddr_in *)i->ifa_addr)->sin_addr, ip, 4) == 0;
+        /* the same interface's link-layer entry */
+        for (j = all; j && !has_mac; j = j->ifa_next) {
+            if (!j->ifa_addr || strcmp(i->ifa_name, j->ifa_name))
+                continue;
+#ifdef __APPLE__
+            if (j->ifa_addr->sa_family == AF_LINK && ((struct sockaddr_dl *)j->ifa_addr)->sdl_alen == 6) {
+                memcpy(m, LLADDR((struct sockaddr_dl *)j->ifa_addr), 6);
+                has_mac = 1;
+            }
+#else
+            if (j->ifa_addr->sa_family == AF_PACKET && ((struct sockaddr_ll *)j->ifa_addr)->sll_halen == 6) {
+                memcpy(m, ((struct sockaddr_ll *)j->ifa_addr)->sll_addr, 6);
+                has_mac = 1;
+            }
+#endif
+        }
+        if (has_mac && (mine || !found)) {
+            memcpy(mac, m, 6);
+            found = 1;
+            if (mine)
+                break;
+        }
+    }
+    freeifaddrs(all);
+#endif
+}
+
 #define PROFILE_NAME "LAN"
 
 /* The one profile is the PC's own network. */
@@ -602,6 +685,7 @@ void tinc_plat_wifi_info(tinc_wifi_info *out)
     out->rssi = 0;
     local_ip(out->ip);
     out->locked = 1; /* the calculator can't change which network the PC is on */
+    local_mac(out->ip, out->mac);
 }
 
 /* Unreachable while locked; kept because the platform interface needs them. */

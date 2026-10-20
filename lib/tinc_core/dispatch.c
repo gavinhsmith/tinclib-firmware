@@ -313,10 +313,13 @@ static uint8_t put_str(uint8_t *p, const char *s)
 
 static uint16_t info(uint8_t seq)
 {
+    tinc_wifi_info w;
     uint8_t n = put_str(PL, TINC_FW_VERSION);
 
     n = (uint8_t)(n + put_str(PL + n, TINC_BOARD_NAME));
-    return ok(TINC_T_INFO, seq, n);
+    tinc_plat_wifi_info(&w);
+    memcpy(PL + n, w.mac, TINC_MAC_LEN);
+    return ok(TINC_T_INFO, seq, (uint16_t)(n + TINC_MAC_LEN));
 }
 
 /* One slot per frame: ssid_len, ssid, wflags. Never the password. */

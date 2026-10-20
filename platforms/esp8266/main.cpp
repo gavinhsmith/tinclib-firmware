@@ -142,6 +142,7 @@ extern "C" void tinc_plat_wifi_info(tinc_wifi_info *out)
     out->rssi = 0;
     memset(out->ip, 0, 4);
     out->locked = TINC_WIFI_LOCK;
+    WiFi.macAddress(out->mac);
     if (!have_slots()) {
         out->state = TINC_WIFI_NO_CREDS;
     } else if (ws == W_UP) {

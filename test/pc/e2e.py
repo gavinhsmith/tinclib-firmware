@@ -159,8 +159,8 @@ def main():
 
         flags, r = link.call(0x02)  # before HELLO
         assert flags == 5 and r[0] == 0x02, "want ERR_NO_HELLO, got %r %r" % (flags, r)
-        flags, r = link.call(0x01, bytes([0, 6, 0, 0, 0, 4]))
-        assert flags == 1 and r[:2] == b"\x00\x06", "HELLO: %r %r" % (flags, r)
+        flags, r = link.call(0x01, bytes([0, 7, 0, 0, 0, 4]))
+        assert flags == 1 and r[:2] == b"\x00\x07", "HELLO: %r %r" % (flags, r)
         assert len(r) == 11 and r[10] == 1, "HELLO should report 1 Wi-Fi slot: %r" % r
         flags, r = link.call(0x02)
         assert flags == 1 and len(r) == 13, "STATUS: %r" % r
@@ -196,7 +196,8 @@ def main():
         print("ok  HEAD: no body")
 
         flags, r = link.call(0x03)
-        assert flags == 1 and r[1:1 + r[0]] == b"0.6.0" and r[2 + r[0]:] == b"PC", "INFO: %r" % r
+        assert flags == 1 and r[1:1 + r[0]] == b"0.7.0" and r[2 + r[0]:-6] == b"PC", "INFO: %r" % r
+        assert r[-6:] != bytes(6), "INFO: no MAC for the interface that reaches the internet: %r" % r
         print("ok  INFO")
 
         err, _, _ = get(link, "http://no-such-host.invalid/")
@@ -228,12 +229,12 @@ def main():
     trace.seek(0)
     log = trace.read()
     print(log[:2000])
-    for want in ("calc > #1 STATUS?", "calc < #1 STATUS -> error NO_HELLO", "HELLO ok v0.6",
+    for want in ("calc > #1 STATUS?", "calc < #1 STATUS -> error NO_HELLO", "HELLO ok v0.7",
                  "REQ_BEGIN GET http://127.0.0.1:", "/data?...", "REQ_STATUS BODY http=200",
                  "BODY_READ @0 max=200 wait=50ms", "bytes EOF", "WIFI_SET -> error LOCKED",
                  'WIFI_GET ssid="LAN"', "wifi_slots=1", "REQ_BEGIN POST http://127.0.0.1:",
                  "BODY_WRITE @0 200 bytes", "BODY_WRITE next=",
-                 "HDR_GET Location", "found, 10 of 10 bytes (not shown)", 'INFO fw="0.6.0" board="PC"'):
+                 "HDR_GET Location", "found, 10 of 10 bytes (not shown)", 'INFO fw="0.7.0" board="PC" mac='):
         assert want in log, "trace is missing %r" % want
     for secret in ("s3cret", "hunter22secret"):
         assert secret not in log, "trace leaked %r" % secret

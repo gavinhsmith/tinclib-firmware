@@ -15,7 +15,7 @@ core so every target gets it for free; a platform layer only adapts one
 target's APIs to the core's interface.
 
 Consumes `tinclib-protocol` as a **git submodule** at
-`external/tinclib-protocol`, pinned to a release tag (currently `v0.6`),
+`external/tinclib-protocol`, pinned to a release tag (currently `v0.7`),
 and compiled in place by `lib/tinc_core/proto.c`. **Never fork or hand-copy
 `protocol.h`/`crc16.c`/`tinc_frame.c` into this repo.** If the shared
 protocol seems to need a change to support something the firmware needs,
@@ -201,7 +201,7 @@ update the roots, replace `certs/cacert.pem` and rebuild. Rules that follow:
 - Insecure mode is a **global TINCLIBC-controlled setting**, off by
   default, and a request's `INSECURE` flag only takes effect if that global
   setting is also on. See `tinclib-protocol`'s `ERR_INSECURE_DISABLED`.
-  Both are reserved, not in 0.6.
+  Both are reserved, not in 0.7.
 - BearSSL on ESP8266 tops out at **TLS 1.2** — a server requiring TLS 1.3
   fails; that's expected and surfaces as `ERR_TLS` / `TINC_TLSR_VERSION`,
   not a crash or a hang. Don't assume ESP32 has the same limit, or that it
